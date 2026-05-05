@@ -1,0 +1,91 @@
+{
+  "version": "1.2.0",
+  "source": "cmd/ueg/main.go",
+  "stages": [
+    {
+      "ordinal": 0,
+      "name": "VOID",
+      "symbol": "○",
+      "architectural_class": "VOID",
+      "executable": false,
+      "terminal": false,
+      "summary": "No request has been received."
+    },
+    {
+      "ordinal": 1,
+      "name": "NASCENT",
+      "symbol": "◔",
+      "architectural_class": "NASCENT",
+      "executable": false,
+      "terminal": false,
+      "summary": "Raw input has arrived and awaits classification."
+    },
+    {
+      "ordinal": 2,
+      "name": "DECLARED",
+      "symbol": "◑",
+      "architectural_class": "DECLARED",
+      "executable": false,
+      "terminal": false,
+      "summary": "Identity is assigned and meaning is being resolved."
+    },
+    {
+      "ordinal": 3,
+      "name": "CANONICAL",
+      "symbol": "◕",
+      "architectural_class": "CANONICAL",
+      "executable": false,
+      "terminal": false,
+      "summary": "Meaning is singular; requirements are about to be checked."
+    },
+    {
+      "ordinal": 4,
+      "name": "GATED",
+      "symbol": "●",
+      "architectural_class": "GATED",
+      "executable": false,
+      "terminal": false,
+      "summary": "Requirements have been evaluated and the gateway knows what is missing or satisfied."
+    },
+    {
+      "ordinal": 5,
+      "name": "REFINABLE",
+      "symbol": "◈",
+      "architectural_class": "CANONICAL",
+      "executable": false,
+      "terminal": false,
+      "summary": "The request is structurally incomplete but safe refinements can move it forward."
+    },
+    {
+      "ordinal": 6,
+      "name": "EXECUTABLE",
+      "symbol": "◉",
+      "architectural_class": "GATED",
+      "executable": true,
+      "terminal": false,
+      "summary": "The command or internal operation is armed and ready to run.",
+      "notes": [
+        "In the seven-class architecture this stage sits at the GATED to SEALED boundary.",
+        "The current CLI does not expose a long-lived SEALED stage because execution begins immediately after arming."
+      ]
+    },
+    {
+      "ordinal": 7,
+      "name": "EXECUTED",
+      "symbol": "✓",
+      "architectural_class": "EXECUTED",
+      "executable": false,
+      "terminal": false,
+      "summary": "Execution finished and output exists."
+    },
+    {
+      "ordinal": 8,
+      "name": "STABILIZED",
+      "symbol": "◆",
+      "architectural_class": "EXECUTED",
+      "executable": false,
+      "terminal": true,
+      "summary": "The result has been recorded into a stable receipt surface."
+    }
+  ]
+}

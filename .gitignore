@@ -1,0 +1,7 @@
+dist/
+.release-work/
+bin/
+coverage.out
+*.exe
+*.zip
+*.test
