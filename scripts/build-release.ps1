@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $OutputDir) {
     $OutputDir = Join-Path $root "dist"
@@ -12,6 +13,55 @@ if (-not $OutputDir) {
 $workDir = Join-Path $root ".release-work"
 $mainPath = Join-Path $root "cmd\\ueg\\main.go"
 $mainSource = Get-Content $mainPath -Raw
+$stableZipTimestamp = [DateTimeOffset]::Parse("2024-01-01T00:00:00+00:00")
+
+function New-DeterministicZip {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDir,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath
+    )
+
+    Remove-Item $DestinationPath -Force -ErrorAction SilentlyContinue
+    $archiveStream = [System.IO.File]::Open($DestinationPath, [System.IO.FileMode]::CreateNew)
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new($archiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+        try {
+            $files = Get-ChildItem $SourceDir -File -Recurse | ForEach-Object {
+                $entryName = $_.FullName.Substring($SourceDir.Length).TrimStart('\').Replace('\', '/')
+                [pscustomobject]@{
+                    FileInfo = $_
+                    EntryName = $entryName
+                }
+            } | Sort-Object EntryName
+
+            foreach ($item in $files) {
+                $entry = $archive.CreateEntry($item.EntryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = $stableZipTimestamp
+                $entryStream = $entry.Open()
+                try {
+                    $inputStream = [System.IO.File]::OpenRead($item.FileInfo.FullName)
+                    try {
+                        $inputStream.CopyTo($entryStream)
+                    }
+                    finally {
+                        $inputStream.Dispose()
+                    }
+                }
+                finally {
+                    $entryStream.Dispose()
+                }
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    finally {
+        $archiveStream.Dispose()
+    }
+}
 
 if ($mainSource -notmatch 'const UEGVersion = "([^"]+)"') {
     throw "Unable to determine UEGVersion from $mainPath"
@@ -56,7 +106,7 @@ try {
         Copy-Item taxonomy\*.json $taxonomyDir
 
         $archivePath = Join-Path $OutputDir "$name.zip"
-        Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $archivePath -Force
+        New-DeterministicZip -SourceDir $stageDir -DestinationPath $archivePath
     }
 }
 finally {

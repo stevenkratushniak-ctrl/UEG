@@ -2,7 +2,7 @@
 
 ## Before publishing
 
-- Confirm you are working from the standalone root at `C:\UEG`
+- Confirm you are working from the standalone root at `C:\UEG_PRODUCT`
 - Confirm the release archives exist in `dist/`
 - Confirm `checksums.txt` exists in `dist/`
 - Confirm `examples/quick_demo.md` is accurate
@@ -11,7 +11,7 @@
 ## GitHub release
 
 - Create the GitHub repository for UEG if it does not already exist
-- Push the contents of `C:\UEG` to the new repository
+- Push the contents of `C:\UEG_PRODUCT` to the new repository
 - Create a release tag that matches the binary version you are publishing
 - Draft the release using `launch/GITHUB_RELEASE_NOTES.md`
 - Upload the four platform archives from `dist/`

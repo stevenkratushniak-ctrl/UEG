@@ -5,7 +5,7 @@ This guide is for getting UEG public as fast as possible with the least moving p
 Recommended fastest path:
 
 1. Create a public GitHub repo named `UEG`
-2. Push the contents of `C:\UEG`
+2. Push the contents of `C:\UEG_PRODUCT`
 3. Publish a GitHub release `v1.2.0`
 4. Use the GitHub repo URL as the public home
 5. Use the GitHub release page as the download location
@@ -29,10 +29,10 @@ In the browser:
 
 You need that URL for the `git remote add origin` command below.
 
-### Run these exact PowerShell commands from `C:\UEG`
+### Run these exact PowerShell commands from `C:\UEG_PRODUCT`
 
 ```powershell
-Set-Location C:\UEG
+Set-Location C:\UEG_PRODUCT
 git status
 git add .
 git commit -m "Initial public UEG release"
@@ -60,7 +60,7 @@ UEG v1.2.0 - Run commands. Prove what happened.
 ```
 
 6. Paste the release notes from the block below into the description field.
-7. Upload these exact files from `C:\UEG\dist`:
+7. Upload these exact files from `C:\UEG_PRODUCT\dist`:
    - `ueg-v1.2.0-windows-amd64.zip`
    - `ueg-v1.2.0-linux-amd64.zip`
    - `ueg-v1.2.0-darwin-amd64.zip`

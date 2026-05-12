@@ -1,0 +1,54 @@
+{
+  "product_name": "UEG",
+  "tagline": "Run commands. Prove what happened.",
+  "source_root": "pre-extraction UEG product tree",
+  "standalone_root": "C:\\UEG_PRODUCT",
+  "backup_root": "C:\\UEG_EXTRACTION_BACKUP_20260512_162417",
+  "requires_fastindustries_root": false,
+  "git": {
+    "branch": "main",
+    "commit": "0b6b4792687204151799986c96510357c52b5153",
+    "remote": "https://github.com/stevenkratushniak-ctrl/UEG.git"
+  },
+  "github_release": {
+    "repo_url": "https://github.com/stevenkratushniak-ctrl/UEG.git",
+    "repo_html_url": "https://github.com/stevenkratushniak-ctrl/UEG",
+    "tag": "v1.2.0",
+    "release_name": "UEG v1.2.0",
+    "release_url": "https://github.com/stevenkratushniak-ctrl/UEG/releases/tag/v1.2.0",
+    "asset_names": [
+      "checksums.txt",
+      "ueg-v1.2.0-darwin-amd64.zip",
+      "ueg-v1.2.0-darwin-arm64.zip",
+      "ueg-v1.2.0-linux-amd64.zip",
+      "ueg-v1.2.0-windows-amd64.zip"
+    ],
+    "asset_digests": {
+      "checksums.txt": "sha256:cd6451a1b1a620d3309e9861fcc142736b3180e9645d9178a929fc0bb8ac6f87",
+      "ueg-v1.2.0-darwin-amd64.zip": "sha256:973c665b0af59ccbe3fcb7edc8d637242471a16209a52667792219e7de12532f",
+      "ueg-v1.2.0-darwin-arm64.zip": "sha256:654e75b7d559870722df1874d7d5e145e7c270f2e76a5c84ceaa48a17e47b5bc",
+      "ueg-v1.2.0-linux-amd64.zip": "sha256:9645781daf7183c61cbc463f339d622ed3ae0e26a51f88d41d6d032386c9120f",
+      "ueg-v1.2.0-windows-amd64.zip": "sha256:16ef6ac4b20028a2a0db6646df4f17e8e8fa233627da1e61504c93079f17fa27"
+    }
+  },
+  "local_release": {
+    "dist_dir": "dist",
+    "checksums_file": "dist/checksums.txt",
+    "reproducible_packaging": true,
+    "matches_live_release": true
+  },
+  "product_hunt": {
+    "submission_packet": "launch/PRODUCT_HUNT_SUBMISSION.md",
+    "screenshot_plan": "launch/SCREENSHOT_PLAN.md",
+    "outreach_copy": "launch/OUTREACH_POSTS.md",
+    "landing_page": "launch/landing-page.html"
+  },
+  "external_operator_evidence": {
+    "receipt_run_ids": [
+      "011758fb326c",
+      "b5b62da3002e"
+    ],
+    "copied_into_product_root": false,
+    "note": "Operator receipts remain external evidence; their publication facts are preserved in the standalone reports."
+  }
+}
