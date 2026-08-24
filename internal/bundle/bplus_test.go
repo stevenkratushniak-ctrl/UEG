@@ -103,6 +103,9 @@ func copyTree(t *testing.T, source, destination string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := copyTreeSecurityMetadata(source, destination); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestBPlusBundleRequiresIndependentIdentityAndCheckpoint(t *testing.T) {
