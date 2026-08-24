@@ -1,0 +1,42 @@
+{
+  "$id": "https://realitylayer.dev/schemas/bundle_seal.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "members_merkle_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "seal_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "signature_b64": {
+      "type": "string"
+    },
+    "signing_key_id": {
+      "type": "string"
+    },
+    "version": {
+      "const": "v1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "seal_id",
+    "version",
+    "created_at",
+    "manifest_sha256",
+    "members_merkle_root",
+    "signing_key_id",
+    "signature_b64"
+  ],
+  "type": "object"
+}

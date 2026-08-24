@@ -1,0 +1,76 @@
+{
+  "$id": "https://realitylayer.dev/schemas/passport.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_digest": {
+      "minLength": 16,
+      "type": "string"
+    },
+    "build_identity": {
+      "minLength": 3,
+      "type": "string"
+    },
+    "build_inputs_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expires_at_iso8601": {
+      "type": "string"
+    },
+    "issued_at_iso8601": {
+      "type": "string"
+    },
+    "passport_id": {
+      "minLength": 16,
+      "type": "string"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "properties": {
+        "predicate": {
+          "type": "object"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "predicate"
+      ],
+      "type": "object"
+    },
+    "signature_b64": {
+      "type": "string"
+    },
+    "signing_key_id": {
+      "type": "string"
+    },
+    "source_commit": {
+      "minLength": 7,
+      "type": "string"
+    },
+    "source_repo": {
+      "minLength": 3,
+      "type": "string"
+    }
+  },
+  "required": [
+    "passport_id",
+    "artifact_digest",
+    "source_repo",
+    "source_commit",
+    "build_identity",
+    "issued_at_iso8601",
+    "expires_at_iso8601",
+    "provenance",
+    "signing_key_id",
+    "signature_b64"
+  ],
+  "title": "Passport v1",
+  "type": "object"
+}

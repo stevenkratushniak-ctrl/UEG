@@ -1,0 +1,22 @@
+{
+  "$id": "https://realitylayer.dev/schemas/lifecycle_checkpoint.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checkpoint_digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "checkpoint_sequence": {"minimum": 0, "type": "integer"},
+    "genesis": {"$ref": "identity_genesis.v1.schema.json"},
+    "identity_id": {"pattern": "^ueg:identity:sha256:[0-9a-f]{64}$", "type": "string"},
+    "lifecycle_records": {
+      "items": {"$ref": "identity_lifecycle_record.v1.schema.json"},
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    },
+    "protocol_version": {"const": "ueg-bplus/1", "type": "string"},
+    "schema": {"const": "ueg.lifecycle-checkpoint.v1", "type": "string"}
+  },
+  "required": ["schema", "protocol_version", "identity_id", "genesis", "lifecycle_records", "checkpoint_sequence", "checkpoint_digest"],
+  "title": "UEG B+ Lifecycle Checkpoint v1",
+  "type": "object"
+}

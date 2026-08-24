@@ -1,1648 +1,1169 @@
-// FILE: main.go
+// Command ueg runs a command and leaves signed, offline-verifiable evidence of
+// what was asked, what was allowed, what ran, and what came back.
 package main
 
 import (
-	"archive/zip"
-	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
-	"runtime"
 	"sort"
+	"strconv"
 	"strings"
-	"time"
+
+	"github.com/stevenkratushniak-ctrl/ueg/internal/bundle"
+	"github.com/stevenkratushniak-ctrl/ueg/internal/gateway"
+	"github.com/stevenkratushniak-ctrl/ueg/internal/identity"
+	"github.com/stevenkratushniak-ctrl/ueg/internal/ledger"
+	"github.com/stevenkratushniak-ctrl/ueg/internal/policy"
 )
 
-const UEGVersion = "1.2.0"
+// Version is the released version, set at build time for release binaries.
+var Version = "2.2.0-v3-candidate.1"
 
-// ════════════════════════════════════════════════════════════════════════════
-// STATE MODEL (CLOSED, COMPLETE)
-// ════════════════════════════════════════════════════════════════════════════
+const usage = `ueg — Universal Execution Gateway
 
-type Stage int
+Runs a command and records signed evidence of it. The evidence can be exported
+and verified by someone who does not trust the machine that produced it.
+
+Usage:
+  ueg identity <command> [flags]             Initialize and manage a B+ evidence identity
+  ueg run [flags] -- <command> [args...]     Classify, admit or refuse, execute, record
+  ueg check [flags] -- <command> [args...]   Classify only; never execute or write state
+  ueg replay [flags] [<receipt-id-prefix>]   Verify the evidence, then re-run and compare
+  ueg export <bundle.tar.gz>                 Write a signed, offline-verifiable bundle
+  ueg verify [trust flags] <bundle.tar.gz>   Verify legacy or B+ evidence without mutation
+  ueg ledger [--json]                        Show the local receipt chain
+  ueg recover [--json]                       Complete an interrupted evidence write
+  ueg policy [--json]                        Show the effect rules in force
+  ueg validate (or ueg --validate)           Prove the properties of the state model
+  ueg version
+
+Flags:
+  --posture enforce|observe   enforce (default) refuses what the rules forbid;
+                              observe records and admits non-prohibited effects
+  --approve                   admit an IRREVOCABLE effect (never a PROHIBITED one)
+  --allow-unclassified        admit a command no rule describes
+  --json                      machine-readable output
+  --home <dir>                evidence directory (default $UEG_HOME or ~/.ueg)
+  --expected-key-id <id>      externally pinned ueg:sha256 fingerprint for identity trust
+  --expected-identity-id <id> externally pinned B+ genesis identity digest
+  --checkpoint <file>         independently supplied B+ lifecycle checkpoint
+  --anchor <file>             independently retained B+ evidence anchor
+  --trust-store <dir>         explicit retained-checkpoint store
+  --require-current-status    fail if offline freshness cannot be established
+
+Exit codes:
+  the command's own exit code when it ran, 77 when UEG refused it, 2 on a
+  verification failure, 3 for an incomplete recorded execution, and 1 on a
+  usage or internal error.
+`
+
+var commandUsage = map[string]string{
+	"run": `Usage: ueg run [--posture enforce|observe] [--approve] [--allow-unclassified] [--json] [--home <dir>] [--checkpoint <file> | --trust-store <dir>] -- <command> [args...]
+
+Classify the command, refuse or admit it, execute admitted commands, and record signed evidence.
+`,
+	"check": `Usage: ueg check [--posture enforce|observe] [--approve] [--allow-unclassified] [--json] [--home <dir>] -- <command> [args...]
+
+Classify the command without executing it or changing any evidence state.
+`,
+	"identity": identityUsage,
+	"replay": `Usage: ueg replay [--posture enforce|observe] [--approve] [--allow-unclassified] [--json] [--home <dir>] [--checkpoint <file> | --trust-store <dir>] [<receipt-id-prefix>]
+
+Verify stored evidence, safely re-run one complete recorded command, and record the replay.
+The posture flag is accepted for command-line compatibility; replay always applies enforce policy.
+`,
+	"export": `Usage: ueg export [--json] [--home <dir>] <bundle.tar.gz>
+
+Write a signed evidence bundle. Export reads but does not change the evidence home.
+`,
+	"verify": `Usage: ueg verify [--json] [--expected-key-id <id> | --expected-identity-id <id> [--checkpoint <file> | --trust-store <dir>] [--anchor <file>] [--minimum-checkpoint-sequence <n> --minimum-checkpoint-digest <sha256>] [--require-current-status]] <bundle.tar.gz>
+
+Verify a bundle without creating or changing a local evidence home.
+Legacy v1/v2 identity trust uses --expected-key-id. B+ requires an independently
+retained genesis identity pin and lifecycle checkpoint for a VERIFIED verdict.
+`,
+	"ledger": `Usage: ueg ledger [--json] [--home <dir>]
+
+Inspect and verify existing local evidence without changing it.
+`,
+	"recover": `Usage: ueg recover [--json] [--home <dir>]
+
+Complete one interrupted paired evidence write, then verify the local chain.
+This command changes the evidence home only when recovery is required.
+`,
+	"policy": `Usage: ueg policy [--json] [--posture enforce|observe] [--approve] [--allow-unclassified] [-- <command> [args...]]
+
+Show the rules or classify one command without executing or recording it.
+`,
+	"validate": `Usage: ueg validate [--json] [--home <dir>]
+
+Validate the state model and, when present, inspect local evidence without changing it.
+`,
+	"version": "Usage: ueg version\n",
+}
+
+func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+type flags struct {
+	posture                   policy.Posture
+	approve                   bool
+	allowUnclass              bool
+	jsonOut                   bool
+	home                      string
+	expectedKey               string
+	expectedIdentity          string
+	checkpoint                string
+	anchor                    string
+	trustStore                string
+	minimumCheckpointSequence *int
+	minimumCheckpointDigest   string
+	requireCurrentStatus      bool
+	lifecycleFreshness        string
+	rest                      []string
+	help                      bool
+	version                   bool
+	sawSeparator              bool
+}
+
+type allowedFlags struct {
+	posture, approve, allowUnclass, jsonOut, home, expectedKey, expectedIdentity                             bool
+	checkpoint, anchor, trustStore, minimumCheckpointSequence, minimumCheckpointDigest, requireCurrentStatus bool
+}
+
+func parseFlags(command string, args []string, allowed allowedFlags) (*flags, error) {
+	f := &flags{posture: policy.Enforce, home: gateway.DefaultHome()}
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			f.sawSeparator = true
+			f.rest = append(f.rest, args[i+1:]...)
+			return f, nil
+		}
+		switch {
+		case a == "-h" || a == "--help":
+			f.help = true
+			i++
+		case a == "--version":
+			f.version = true
+			i++
+		case a == "--posture":
+			if !allowed.posture {
+				return nil, fmt.Errorf("--posture is not valid for %s", command)
+			}
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--posture needs a value (enforce or observe)")
+			}
+			p := policy.Posture(args[i+1])
+			if p != policy.Enforce && p != policy.Observe {
+				return nil, fmt.Errorf("unknown posture %q", args[i+1])
+			}
+			f.posture = p
+			i += 2
+		case strings.HasPrefix(a, "--posture="):
+			if !allowed.posture {
+				return nil, fmt.Errorf("--posture is not valid for %s", command)
+			}
+			p := policy.Posture(strings.TrimPrefix(a, "--posture="))
+			if p != policy.Enforce && p != policy.Observe {
+				return nil, fmt.Errorf("unknown posture %q", p)
+			}
+			f.posture = p
+			i++
+		case a == "--approve":
+			if !allowed.approve {
+				return nil, fmt.Errorf("--approve is not valid for %s", command)
+			}
+			f.approve = true
+			i++
+		case a == "--allow-unclassified":
+			if !allowed.allowUnclass {
+				return nil, fmt.Errorf("--allow-unclassified is not valid for %s", command)
+			}
+			f.allowUnclass = true
+			i++
+		case a == "--json":
+			if !allowed.jsonOut {
+				return nil, fmt.Errorf("--json is not valid for %s", command)
+			}
+			f.jsonOut = true
+			i++
+		case a == "--home":
+			if !allowed.home {
+				return nil, fmt.Errorf("--home is not valid for %s", command)
+			}
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--home needs a directory")
+			}
+			f.home = args[i+1]
+			if strings.TrimSpace(f.home) == "" {
+				return nil, fmt.Errorf("--home needs a non-empty directory")
+			}
+			i += 2
+		case strings.HasPrefix(a, "--home="):
+			if !allowed.home {
+				return nil, fmt.Errorf("--home is not valid for %s", command)
+			}
+			f.home = strings.TrimPrefix(a, "--home=")
+			if strings.TrimSpace(f.home) == "" {
+				return nil, fmt.Errorf("--home needs a non-empty directory")
+			}
+			i++
+		case a == "--expected-key-id":
+			if !allowed.expectedKey {
+				return nil, fmt.Errorf("--expected-key-id is not valid for %s", command)
+			}
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--expected-key-id needs a ueg:sha256 fingerprint")
+			}
+			f.expectedKey = args[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--expected-key-id="):
+			if !allowed.expectedKey {
+				return nil, fmt.Errorf("--expected-key-id is not valid for %s", command)
+			}
+			f.expectedKey = strings.TrimPrefix(a, "--expected-key-id=")
+			if strings.TrimSpace(f.expectedKey) == "" {
+				return nil, fmt.Errorf("--expected-key-id needs a ueg:sha256 fingerprint")
+			}
+			i++
+		case a == "--expected-identity-id":
+			if !allowed.expectedIdentity {
+				return nil, fmt.Errorf("--expected-identity-id is not valid for %s", command)
+			}
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return nil, fmt.Errorf("--expected-identity-id needs a complete B+ genesis identity pin")
+			}
+			f.expectedIdentity = args[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--expected-identity-id="):
+			if !allowed.expectedIdentity {
+				return nil, fmt.Errorf("--expected-identity-id is not valid for %s", command)
+			}
+			f.expectedIdentity = strings.TrimPrefix(a, "--expected-identity-id=")
+			if strings.TrimSpace(f.expectedIdentity) == "" {
+				return nil, fmt.Errorf("--expected-identity-id needs a complete B+ genesis identity pin")
+			}
+			i++
+		case a == "--checkpoint" || a == "--anchor" || a == "--trust-store" || a == "--minimum-checkpoint-digest":
+			name := strings.TrimPrefix(a, "--")
+			permitted := map[string]bool{"checkpoint": allowed.checkpoint, "anchor": allowed.anchor, "trust-store": allowed.trustStore, "minimum-checkpoint-digest": allowed.minimumCheckpointDigest}[name]
+			if !permitted {
+				return nil, fmt.Errorf("%s is not valid for %s", a, command)
+			}
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return nil, fmt.Errorf("%s needs a non-empty value", a)
+			}
+			switch name {
+			case "checkpoint":
+				f.checkpoint = args[i+1]
+			case "anchor":
+				f.anchor = args[i+1]
+			case "trust-store":
+				f.trustStore = args[i+1]
+			case "minimum-checkpoint-digest":
+				f.minimumCheckpointDigest = args[i+1]
+			}
+			i += 2
+		case a == "--minimum-checkpoint-sequence":
+			if !allowed.minimumCheckpointSequence {
+				return nil, fmt.Errorf("--minimum-checkpoint-sequence is not valid for %s", command)
+			}
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--minimum-checkpoint-sequence needs a non-negative integer")
+			}
+			value, parseErr := strconv.Atoi(args[i+1])
+			if parseErr != nil || value < 0 {
+				return nil, fmt.Errorf("--minimum-checkpoint-sequence needs a non-negative integer")
+			}
+			f.minimumCheckpointSequence = &value
+			i += 2
+		case a == "--require-current-status":
+			if !allowed.requireCurrentStatus {
+				return nil, fmt.Errorf("--require-current-status is not valid for %s", command)
+			}
+			f.requireCurrentStatus = true
+			i++
+		default:
+			if strings.HasPrefix(a, "-") {
+				return nil, fmt.Errorf("unknown option %q for %s", a, command)
+			}
+			f.rest = append(f.rest, args[i:]...)
+			return f, nil
+		}
+	}
+	return f, nil
+}
+
+func run(args []string) int {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fmt.Print(usage)
+		return 0
+	}
+	if args[0] == "--validate" {
+		args = append([]string{"validate"}, args[1:]...)
+	}
+	if args[0] == "--version" {
+		printVersion()
+		return 0
+	}
+	if args[0] == "help" {
+		if len(args) == 1 {
+			fmt.Print(usage)
+			return 0
+		}
+		if len(args) == 2 {
+			if help, ok := commandUsage[args[1]]; ok {
+				fmt.Print(help)
+				return 0
+			}
+		}
+		fmt.Fprintln(os.Stderr, "ueg: help needs one known command name; run ueg --help to see available commands")
+		return 1
+	}
+
+	command := args[0]
+	if command == "identity" {
+		return cmdIdentity(args[1:])
+	}
+	var allowed allowedFlags
+	switch command {
+	case "run":
+		allowed = allowedFlags{posture: true, approve: true, allowUnclass: true, jsonOut: true, home: true, checkpoint: true, trustStore: true}
+	case "check":
+		allowed = allowedFlags{posture: true, approve: true, allowUnclass: true, jsonOut: true, home: true}
+	case "replay":
+		allowed = allowedFlags{posture: true, approve: true, allowUnclass: true, jsonOut: true, home: true, checkpoint: true, trustStore: true}
+	case "export", "ledger", "recover", "validate":
+		allowed = allowedFlags{jsonOut: true, home: true}
+	case "verify":
+		allowed = allowedFlags{jsonOut: true, expectedKey: true, expectedIdentity: true, checkpoint: true, anchor: true,
+			trustStore: true, minimumCheckpointSequence: true, minimumCheckpointDigest: true, requireCurrentStatus: true}
+	case "policy":
+		allowed = allowedFlags{posture: true, approve: true, allowUnclass: true, jsonOut: true}
+	case "version":
+		allowed = allowedFlags{}
+	default:
+		jsonOut := jsonRequested(args)
+		if strings.HasPrefix(command, "-") {
+			return cliError(jsonOut, "USAGE", fmt.Sprintf("unknown option %q; run ueg --help to see available commands", command), 1)
+		} else {
+			return cliError(jsonOut, "USAGE", fmt.Sprintf("unknown command %q; run ueg --help to see available commands", command), 1)
+		}
+	}
+	f, err := parseFlags(command, args[1:], allowed)
+	if err != nil {
+		return cliError(jsonRequested(args[1:]), "USAGE", err.Error(), 1)
+	}
+	if f.help || (len(f.rest) == 1 && f.rest[0] == "help" && !f.sawSeparator) {
+		fmt.Print(commandUsage[command])
+		return 0
+	}
+	if f.version {
+		printVersion()
+		return 0
+	}
+
+	switch command {
+	case "version":
+		if len(f.rest) != 0 {
+			return cliError(f.jsonOut, "USAGE", "version takes no arguments", 1)
+		}
+		printVersion()
+		return 0
+	case "validate":
+		if len(f.rest) != 0 {
+			return usageError(f, "validate takes no arguments", command)
+		}
+		return cmdValidate(f)
+	case "policy":
+		if len(f.rest) > 0 && !f.sawSeparator {
+			return usageError(f, "put a command after -- when asking policy to classify it", command)
+		}
+		return cmdPolicy(f)
+	case "run", "check":
+		if !f.sawSeparator {
+			if len(f.rest) == 0 {
+				return usageError(f, "no command given; put the command to evaluate after --", command)
+			}
+			return usageError(f, "put the command to evaluate after --", command)
+		}
+		return cmdRun(f, command == "check")
+	case "replay":
+		if len(f.rest) > 1 || f.sawSeparator {
+			return usageError(f, "replay accepts at most one receipt-id prefix", command)
+		}
+		return cmdReplay(f)
+	case "export":
+		if len(f.rest) != 1 || f.sawSeparator {
+			if len(f.rest) == 0 {
+				return usageError(f, "export needs an output path", command)
+			}
+			return usageError(f, "export needs exactly one bundle path", command)
+		}
+		return cmdExport(f)
+	case "verify":
+		if len(f.rest) != 1 || f.sawSeparator {
+			if len(f.rest) == 0 {
+				return usageError(f, "verify needs a bundle path", command)
+			}
+			return usageError(f, "verify needs exactly one bundle path", command)
+		}
+		return cmdVerify(f)
+	case "ledger":
+		if len(f.rest) != 0 {
+			return usageError(f, "ledger takes no arguments", command)
+		}
+		return cmdLedger(f)
+	case "recover":
+		if len(f.rest) != 0 {
+			return usageError(f, "recover takes no arguments", command)
+		}
+		return cmdRecover(f)
+	}
+	return 1
+}
+
+func printVersion() {
+	fmt.Printf("ueg %s (rules v%s, %d rules, %s)\n", Version, policy.RulesVersion(), policy.RuleCount(), policy.RulesHash[:12])
+}
+
+func usageError(f *flags, message, command string) int {
+	if f.jsonOut {
+		return cliError(true, "USAGE", message, 1)
+	}
+	fmt.Fprintf(os.Stderr, "ueg: %s\n\n%s", message, commandUsage[command])
+	return 1
+}
+
+func jsonRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--json" {
+			return true
+		}
+	}
+	return false
+}
+
+func cliError(jsonOut bool, code, message string, exitCode int) int {
+	if jsonOut {
+		printJSON(map[string]any{
+			"ok":        false,
+			"exit_code": exitCode,
+			"error": map[string]any{
+				"code":    code,
+				"message": message,
+			},
+		})
+		return exitCode
+	}
+	fmt.Fprintln(os.Stderr, "ueg:", message)
+	return exitCode
+}
+
+type ledgerMode int
 
 const (
-	VOID Stage = iota
-	NASCENT
-	DECLARED
-	CANONICAL
-	GATED
-	REFINABLE
-	EXECUTABLE
-	EXECUTED
-	STABILIZED
+	ledgerCreate ledgerMode = iota
+	ledgerExistingWrite
+	ledgerRecover
+	ledgerReadOnly
+	ledgerReadOnlyPrivate
 )
 
-var stageNames = []string{
-	"VOID", "NASCENT", "DECLARED", "CANONICAL",
-	"GATED", "REFINABLE", "EXECUTABLE", "EXECUTED", "STABILIZED",
-}
-
-var stageSymbols = []string{
-	"○", "◔", "◑", "◕", "●", "◈", "◉", "✓", "◆",
-}
-
-func (s Stage) String() string   { return stageNames[s] }
-func (s Stage) Symbol() string   { return stageSymbols[s] }
-func (s Stage) Executable() bool { return s == EXECUTABLE }
-func (s Stage) Terminal() bool   { return s == STABILIZED }
-
-// ════════════════════════════════════════════════════════════════════════════
-// STATE OBJECT (IMMUTABLE)
-// ════════════════════════════════════════════════════════════════════════════
-
-type State struct {
-	Stage        Stage           `json:"stage"`
-	Timestamp    string          `json:"timestamp"`
-	TraceID      string          `json:"trace_id"`
-	Raw          []string        `json:"raw,omitempty"`
-	Identity     *Identity       `json:"identity,omitempty"`
-	Meaning      *Meaning        `json:"meaning,omitempty"`
-	Requirements map[string]*Req `json:"requirements,omitempty"`
-	Refinements  []*Refinement   `json:"refinements,omitempty"`
-	Execution    *Execution      `json:"execution,omitempty"`
-	Output       *Output         `json:"output,omitempty"`
-}
-
-type Identity struct {
-	Domain string   `json:"domain"`
-	Kind   string   `json:"kind"`
-	Cmd    string   `json:"cmd"`
-	Args   []string `json:"args"`
-}
-
-type Meaning struct {
-	Resolved     string   `json:"resolved,omitempty"`
-	Interpreter  string   `json:"interpreter,omitempty"`
-	Intent       string   `json:"intent,omitempty"`
-	Target       string   `json:"target,omitempty"`
-	Confidence   float64  `json:"confidence,omitempty"`
-	Command      []string `json:"command,omitempty"`
-	Dangerous    bool     `json:"dangerous,omitempty"`
-	NonShellOp   bool     `json:"non_shell_op,omitempty"` // prompt actions executed internally
-	InternalNote string   `json:"internal_note,omitempty"`
-}
-
-type Req struct {
-	Met      bool   `json:"met"`
-	Path     string `json:"path,omitempty"`
-	Kind     string `json:"kind,omitempty"`
-	Resolved string `json:"resolved,omitempty"`
-	Package  string `json:"package,omitempty"`
-	Status   string `json:"status,omitempty"`
-}
-
-type Refinement struct {
-	Type     string `json:"type"`
-	Original string `json:"original,omitempty"`
-	Resolved string `json:"resolved,omitempty"`
-	Question string `json:"question,omitempty"`
-	Package  string `json:"package,omitempty"`
-	Command  string `json:"command,omitempty"`
-}
-
-type Execution struct {
-	Command []string `json:"command"`
-	Started string   `json:"started"`
-}
-
-type Output struct {
-	ReturnCode  int    `json:"return_code"`
-	Stdout      string `json:"stdout"`
-	Stderr      string `json:"stderr"`
-	DurationMs  int64  `json:"duration_ms"`
-	ExternalRef string `json:"external_ref,omitempty"`
-}
-
-func newState(traceID string) *State {
-	return &State{
-		Stage:     VOID,
-		Timestamp: nowUTC(),
-		TraceID:   traceID,
-	}
-}
-
-func (s *State) advance(stage Stage) *State {
-	return &State{
-		Stage:        stage,
-		Timestamp:    nowUTC(),
-		TraceID:      s.TraceID,
-		Raw:          s.Raw,
-		Identity:     s.Identity,
-		Meaning:      s.Meaning,
-		Requirements: s.Requirements,
-		Refinements:  s.Refinements,
-		Execution:    s.Execution,
-		Output:       s.Output,
-	}
-}
-
-func nowUTC() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
-}
-
-func traceID() string {
-	// Unique, not deterministic. Determinism belongs to receipts checksum & replay path.
-	h := sha256.Sum256([]byte(fmt.Sprintf("%d|%d|%s", time.Now().UnixNano(), os.Getpid(), runtime.GOOS)))
-	return fmt.Sprintf("%x", h[:5])
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// TRANSITION LOG (RECEIPT/REPLAY)
-// ════════════════════════════════════════════════════════════════════════════
-
-type Transition struct {
-	From      Stage  `json:"from"`
-	To        Stage  `json:"to"`
-	Action    string `json:"action"`
-	Timestamp string `json:"timestamp"`
-}
-
-type Receipt struct {
-	Version         string        `json:"version"`
-	TraceID         string        `json:"trace_id"`
-	StartTime       string        `json:"start_time"`
-	EndTime         string        `json:"end_time"`
-	Input           []string      `json:"input"`
-	FinalStage      Stage         `json:"final_stage"`
-	Transitions     []*Transition `json:"transitions"`
-	FinalState      *State        `json:"final_state"`
-	Meta            *Meta         `json:"meta"`
-	Checksum        string        `json:"checksum"`
-	DeterminismHash string        `json:"determinism_hash"`
-}
-
-type Meta struct {
-	UEGVersion string `json:"ueg_version"`
-	GOOS       string `json:"goos"`
-	GOARCH     string `json:"goarch"`
-	CWD        string `json:"cwd"`
-}
-
-// Deterministic checksum view (NO MAPS)
-type reqKV struct {
-	Name string `json:"name"`
-	Req  *Req   `json:"req"`
-}
-type stateView struct {
-	Stage        Stage         `json:"stage"`
-	Timestamp    string        `json:"timestamp"`
-	TraceID      string        `json:"trace_id"`
-	Raw          []string      `json:"raw,omitempty"`
-	Identity     *Identity     `json:"identity,omitempty"`
-	Meaning      *Meaning      `json:"meaning,omitempty"`
-	Requirements []reqKV       `json:"requirements,omitempty"`
-	Refinements  []*Refinement `json:"refinements,omitempty"`
-	Execution    *Execution    `json:"execution,omitempty"`
-	Output       *Output       `json:"output,omitempty"`
-}
-
-func canonicalState(s *State) *stateView {
-	if s == nil {
-		return nil
-	}
-	v := &stateView{
-		Stage:       s.Stage,
-		Timestamp:   s.Timestamp,
-		TraceID:     s.TraceID,
-		Raw:         s.Raw,
-		Identity:    s.Identity,
-		Meaning:     s.Meaning,
-		Refinements: s.Refinements,
-		Execution:   s.Execution,
-		Output:      s.Output,
-	}
-	if s.Requirements != nil {
-		keys := make([]string, 0, len(s.Requirements))
-		for k := range s.Requirements {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		out := make([]reqKV, 0, len(keys))
-		for _, k := range keys {
-			out = append(out, reqKV{Name: k, Req: s.Requirements[k]})
-		}
-		v.Requirements = out
-	}
-	return v
-}
-
-type transitionView struct {
-	From   Stage  `json:"from"`
-	To     Stage  `json:"to"`
-	Action string `json:"action"`
-}
-
-type meaningView struct {
-	Resolved     string   `json:"resolved,omitempty"`
-	Interpreter  string   `json:"interpreter,omitempty"`
-	Intent       string   `json:"intent,omitempty"`
-	Target       string   `json:"target,omitempty"`
-	Dangerous    bool     `json:"dangerous,omitempty"`
-	NonShellOp   bool     `json:"non_shell_op,omitempty"`
-	InternalNote string   `json:"internal_note,omitempty"`
-	Command      []string `json:"command,omitempty"`
-}
-
-type stateDetView struct {
-	Stage        Stage         `json:"stage"`
-	Raw          []string      `json:"raw,omitempty"`
-	Identity     *Identity     `json:"identity,omitempty"`
-	Meaning      *meaningView  `json:"meaning,omitempty"`
-	Requirements []reqKV       `json:"requirements,omitempty"`
-	Refinements  []*Refinement `json:"refinements,omitempty"`
-	Execution    []string      `json:"execution,omitempty"`
-	ReturnCode   *int          `json:"return_code,omitempty"`
-}
-
-func canonicalStateDet(s *State) *stateDetView {
-	if s == nil {
-		return nil
-	}
-	v := &stateDetView{
-		Stage:       s.Stage,
-		Raw:         s.Raw,
-		Identity:    s.Identity,
-		Refinements: s.Refinements,
-	}
-	if s.Meaning != nil {
-		v.Meaning = &meaningView{
-			Resolved:     s.Meaning.Resolved,
-			Interpreter:  s.Meaning.Interpreter,
-			Intent:       s.Meaning.Intent,
-			Target:       s.Meaning.Target,
-			Dangerous:    s.Meaning.Dangerous,
-			NonShellOp:   s.Meaning.NonShellOp,
-			InternalNote: s.Meaning.InternalNote,
-			Command:      s.Meaning.Command,
-		}
-	}
-	if s.Requirements != nil {
-		keys := make([]string, 0, len(s.Requirements))
-		for k := range s.Requirements {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		out := make([]reqKV, 0, len(keys))
-		for _, k := range keys {
-			out = append(out, reqKV{Name: k, Req: s.Requirements[k]})
-		}
-		v.Requirements = out
-	}
-	if s.Execution != nil {
-		v.Execution = s.Execution.Command
-	}
-	if s.Output != nil {
-		rc := s.Output.ReturnCode
-		v.ReturnCode = &rc
-	}
-	return v
-}
-
-func (r *Receipt) computeDeterminismHash() string {
-	// Determinism hash: stable across replays when decision logic is stable.
-	// Excludes timestamps, trace IDs, cwd, stdout/stderr, and duration.
-	type metaView struct {
-		UEGVersion string `json:"ueg_version"`
-		GOOS       string `json:"goos"`
-		GOARCH     string `json:"goarch"`
-	}
-	type detView struct {
-		Version    string           `json:"version"`
-		Input      []string         `json:"input"`
-		FinalStage Stage            `json:"final_stage"`
-		Flow       []transitionView `json:"flow"`
-		Final      *stateDetView    `json:"final"`
-		Meta       metaView         `json:"meta"`
-	}
-	flow := make([]transitionView, 0, len(r.Transitions))
-	for _, t := range r.Transitions {
-		if t == nil {
-			continue
-		}
-		flow = append(flow, transitionView{From: t.From, To: t.To, Action: t.Action})
-	}
-	meta := metaView{}
-	if r.Meta != nil {
-		meta = metaView{
-			UEGVersion: r.Meta.UEGVersion,
-			GOOS:       r.Meta.GOOS,
-			GOARCH:     r.Meta.GOARCH,
-		}
-	}
-	v := detView{
-		Version:    r.Version,
-		Input:      r.Input,
-		FinalStage: r.FinalStage,
-		Flow:       flow,
-		Final:      canonicalStateDet(r.FinalState),
-		Meta:       meta,
-	}
-	data, _ := json.Marshal(v)
-	h := sha256.Sum256(data)
-	return fmt.Sprintf("%x", h[:16])
-}
-
-func (r *Receipt) computeChecksum() string {
-	// Tamper-evident checksum over deterministic canonical subset (excluding Checksum field itself).
-	type checksumView struct {
-		Version     string        `json:"version"`
-		Input       []string      `json:"input"`
-		FinalStage  Stage         `json:"final_stage"`
-		Transitions []*Transition `json:"transitions"`
-		FinalState  *stateView    `json:"final_state"`
-		Meta        *Meta         `json:"meta"`
-	}
-	v := checksumView{
-		Version:     r.Version,
-		Input:       r.Input,
-		FinalStage:  r.FinalStage,
-		Transitions: r.Transitions,
-		FinalState:  canonicalState(r.FinalState),
-		Meta:        r.Meta,
-	}
-	data, _ := json.Marshal(v)
-	h := sha256.Sum256(data)
-	return fmt.Sprintf("%x", h[:16])
-}
-
-func (r *Receipt) verifyChecksum() bool {
-	return r.Checksum == r.computeChecksum()
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// DOMAIN HANDLERS
-// ════════════════════════════════════════════════════════════════════════════
-
-func identifyCLI(raw []string) *Identity {
-	if len(raw) == 0 {
-		return nil
-	}
-	cmd := raw[0]
-	args := []string{}
-	if len(raw) > 1 {
-		args = raw[1:]
-	}
-
-	kind := "system"
-	lc := strings.ToLower(cmd)
-	switch {
-	case strings.HasSuffix(lc, ".py"):
-		kind = "python"
-	case strings.HasSuffix(lc, ".sh"):
-		kind = "shell"
-	case strings.HasSuffix(lc, ".js"):
-		kind = "node"
-	case strings.Contains(cmd, "/") || strings.Contains(cmd, "\\"):
-		kind = "path"
-	}
-
-	return &Identity{Domain: "cli", Kind: kind, Cmd: cmd, Args: args}
-}
-
-var promptPatterns = []struct {
-	re     *regexp.Regexp
-	intent string
-}{
-	{regexp.MustCompile(`(?i)^(run|execute|start)\s+(.+)`), "execute"},
-	{regexp.MustCompile(`(?i)^(list|show|display)\s+(?:files?\s+)?(?:in\s+)?(.+)`), "list"},
-	{regexp.MustCompile(`(?i)^(create|make|new)\s+(.+)`), "create"},
-	{regexp.MustCompile(`(?i)^(delete|remove|rm)\s+(.+)`), "delete"},
-	{regexp.MustCompile(`(?i)^(find|search|locate)\s+(.+)`), "find"},
-	{regexp.MustCompile(`(?i)^(install|add)\s+(.+)`), "install"},
-	{regexp.MustCompile(`(?i)^(open|edit)\s+(.+)`), "open"},
-	{regexp.MustCompile(`(?i)^(check|verify|test)\s+(.+)`), "check"},
-}
-
-func identifyPrompt(raw []string) *Identity {
-	text := strings.Join(raw, " ")
-	return &Identity{Domain: "prompt", Kind: "natural", Cmd: text, Args: nil}
-}
-
-func identifyEnv(raw []string) *Identity {
-	text := strings.ToLower(strings.Join(raw, " "))
-	kind := "unknown"
-	if strings.Contains(text, "install") || strings.Contains(text, "package") {
-		kind = "package"
-	} else if strings.Contains(text, "path") || strings.Contains(text, "env") {
-		kind = "variable"
-	}
-	return &Identity{Domain: "env", Kind: kind, Cmd: strings.Join(raw, " "), Args: nil}
-}
-
-func which(cmd string) string {
-	path, err := exec.LookPath(cmd)
-	if err != nil {
-		return ""
-	}
-	return path
-}
-
-func absPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if filepath.IsAbs(p) {
-		return p
-	}
-	ap, err := filepath.Abs(p)
-	if err != nil {
-		return p
-	}
-	return ap
-}
-
-func canonicalizeCLI(id *Identity) *Meaning {
-	m := &Meaning{}
-
-	switch id.Kind {
-	case "system":
-		m.Resolved = which(id.Cmd)
-	case "python":
-		m.Interpreter = which("python3")
-		if m.Interpreter == "" {
-			m.Interpreter = which("python")
-		}
-		m.Resolved = absPath(id.Cmd)
-	case "shell":
-		m.Interpreter = which("bash")
-		if m.Interpreter == "" {
-			m.Interpreter = which("sh")
-		}
-		m.Resolved = absPath(id.Cmd)
-	case "node":
-		m.Interpreter = which("node")
-		m.Resolved = absPath(id.Cmd)
-	case "path":
-		m.Resolved = absPath(id.Cmd)
-	}
-
-	if m.Interpreter != "" && m.Resolved != "" {
-		m.Command = append([]string{m.Interpreter, m.Resolved}, id.Args...)
-	} else if m.Resolved != "" {
-		m.Command = append([]string{m.Resolved}, id.Args...)
-	}
-
-	return m
-}
-
-func canonicalizePrompt(id *Identity) *Meaning {
-	text := strings.ToLower(id.Cmd)
-	m := &Meaning{Confidence: 0}
-
-	for _, p := range promptPatterns {
-		matches := p.re.FindStringSubmatch(text)
-		if len(matches) >= 3 {
-			m.Intent = p.intent
-			m.Target = strings.TrimSpace(matches[2])
-			m.Confidence = 0.9
-			break
-		}
-	}
-
-	if m.Intent == "" {
-		return m
-	}
-
-	// For prompt actions, prefer internal ops (cross-platform + safer).
-	switch m.Intent {
-	case "list", "create", "find", "check", "open":
-		m.NonShellOp = true
-		m.Resolved = "internal"
-		m.Command = []string{"internal", m.Intent, m.Target}
-
-	case "delete":
-		// Destructive internal op: require confirmation.
-		m.NonShellOp = true
-		m.Dangerous = true
-		m.InternalNote = "destructive_internal_op"
-		m.Resolved = "internal"
-		m.Command = []string{"internal", m.Intent, m.Target}
-
-	case "install":
-		// External op; treat as dangerous.
-		m.Dangerous = true
-		pip := which("pip3")
-		if pip == "" {
-			pip = which("pip")
-		}
-		if pip != "" && m.Target != "" {
-			m.Command = []string{pip, "install", m.Target}
-			m.Resolved = pip
-		}
-
-	case "execute":
-		// External execution.
-		m.Dangerous = true
-		target := strings.TrimSpace(m.Target)
-		if target == "" {
-			return m
-		}
-		parts := strings.Fields(target)
-		if len(parts) == 0 {
-			return m
-		}
-		bin := which(parts[0])
-		if bin != "" {
-			m.Resolved = bin
-			m.Command = append([]string{bin}, parts[1:]...)
-		} else {
-			m.Resolved = ""
-			m.Command = nil
-		}
-	}
-
-	return m
-}
-
-func canonicalizeEnv(id *Identity) *Meaning {
-	m := &Meaning{}
-	text := strings.ToLower(id.Cmd)
-
-	text = strings.ReplaceAll(text, "install", "")
-	text = strings.ReplaceAll(text, "package", "")
-	parts := strings.Fields(text)
-	packages := []string{}
-	for _, p := range parts {
-		if p != "" && !strings.HasPrefix(p, "-") {
-			packages = append(packages, p)
-		}
-	}
-
-	if len(packages) > 0 {
-		m.Target = strings.Join(packages, " ")
-		pip := which("pip3")
-		if pip == "" {
-			pip = which("pip")
-		}
-		if pip != "" {
-			m.Command = append([]string{pip, "install"}, packages...)
-			m.Resolved = pip
-			m.Dangerous = true
-		}
-	}
-
-	return m
-}
-
-func fileExists(p string) bool {
-	if p == "" {
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
-}
-
-func isExecutableFile(p string) bool {
-	if p == "" {
-		return false
-	}
-	info, err := os.Stat(p)
-	if err != nil {
-		return false
-	}
-	mode := info.Mode()
-	if runtime.GOOS == "windows" {
-		ext := strings.ToLower(filepath.Ext(p))
-		return ext == ".exe" || ext == ".bat" || ext == ".cmd" || ext == ".com"
-	}
-	return mode&0111 != 0
-}
-
-func checkRequirementsCLI(m *Meaning, id *Identity) map[string]*Req {
-	reqs := make(map[string]*Req)
-
-	if m.Resolved != "" {
-		reqs["target_exists"] = &Req{Met: fileExists(m.Resolved), Path: m.Resolved}
-		reqs["target_executable"] = &Req{Met: isExecutableFile(m.Resolved), Path: m.Resolved}
-	} else {
-		reqs["target_exists"] = &Req{Met: false, Path: id.Cmd}
-		reqs["target_executable"] = &Req{Met: false}
-	}
-
-	if id.Kind == "python" || id.Kind == "shell" || id.Kind == "node" {
-		reqs["interpreter"] = &Req{
-			Met:      m.Interpreter != "",
-			Kind:     id.Kind,
-			Resolved: m.Interpreter,
-		}
-	}
-
-	return reqs
-}
-
-func checkRequirementsPrompt(m *Meaning, requireYes bool) map[string]*Req {
-	reqs := make(map[string]*Req)
-
-	reqs["intent_recognized"] = &Req{Met: m.Intent != "", Kind: m.Intent}
-	reqs["target_specified"] = &Req{Met: m.Target != "", Path: m.Target}
-
-	if m.Dangerous {
-		reqs["dangerous_confirmed"] = &Req{Met: requireYes, Kind: "yes_required"}
-	}
-
-	// For internal ops, command always valid if intent + target are present.
-	if m.NonShellOp {
-		reqs["command_valid"] = &Req{Met: m.Intent != "" && m.Target != "", Path: "internal"}
-		return reqs
-	}
-
-	if len(m.Command) > 0 && m.Command[0] != "" {
-		reqs["command_valid"] = &Req{Met: true, Path: m.Command[0]}
-	} else {
-		reqs["command_valid"] = &Req{Met: false}
-	}
-
-	return reqs
-}
-
-func checkRequirementsEnv(m *Meaning, requireYes bool) map[string]*Req {
-	reqs := make(map[string]*Req)
-
-	reqs["packages_specified"] = &Req{Met: m.Target != "", Package: m.Target}
-	reqs["manager_available"] = &Req{Met: m.Resolved != "", Resolved: m.Resolved}
-	if m.Dangerous {
-		reqs["dangerous_confirmed"] = &Req{Met: requireYes, Kind: "yes_required"}
-	}
-
-	return reqs
-}
-
-func identifyRefinements(reqs map[string]*Req) []*Refinement {
-	refs := []*Refinement{}
-
-	// stable order
-	keys := make([]string, 0, len(reqs))
-	for k := range reqs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, name := range keys {
-		req := reqs[name]
-		if req.Met {
-			continue
-		}
-
-		switch name {
-		case "target_exists":
-			if req.Path != "" {
-				// Try PATH resolution as a refinement.
-				if which(filepath.Base(req.Path)) != "" {
-					refs = append(refs, &Refinement{
-						Type:     "path_resolution",
-						Original: req.Path,
-						Resolved: which(filepath.Base(req.Path)),
-					})
-					continue
-				}
-				// Try common bin dirs (unix only)
-				if runtime.GOOS != "windows" {
-					bases := []string{"/usr/bin", "/usr/local/bin", "/bin"}
-					for _, base := range bases {
-						candidate := filepath.Join(base, filepath.Base(req.Path))
-						if fileExists(candidate) {
-							refs = append(refs, &Refinement{
-								Type:     "path_resolution",
-								Original: req.Path,
-								Resolved: candidate,
-							})
-							break
-						}
-					}
-				}
-			}
-		case "intent_recognized":
-			refs = append(refs, &Refinement{
-				Type:     "clarification_needed",
-				Question: "What action would you like to perform? (run, list, create, delete, find, install, open, check)",
-			})
-		case "target_specified":
-			refs = append(refs, &Refinement{
-				Type:     "clarification_needed",
-				Question: "What is the target of this action?",
-			})
-		case "interpreter":
-			pkgMap := map[string]string{"python": "python3", "node": "nodejs", "shell": "bash"}
-			if pkg, ok := pkgMap[req.Kind]; ok {
-				refs = append(refs, &Refinement{
-					Type:    "install_available",
-					Package: pkg,
-					Command: "install " + pkg + " (system package manager)",
-				})
-			}
-		case "packages_specified":
-			refs = append(refs, &Refinement{
-				Type:     "clarification_needed",
-				Question: "Which package(s) should be installed?",
-			})
-		case "dangerous_confirmed":
-			refs = append(refs, &Refinement{
-				Type:     "confirmation_needed",
-				Question: "This action can change your system. Re-run with --yes to confirm.",
-			})
-		}
-	}
-
-	return refs
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// INTERNAL OPS (PROMPT MODE, CROSS-PLATFORM, NO SHELL)
-// ════════════════════════════════════════════════════════════════════════════
-
-func cwdPath() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	return cwd
-}
-
-func isWithinCWD(p string) bool {
-	cwd := cwdPath()
-	if cwd == "" {
-		return false
-	}
-	ap := absPath(p)
-	rel, err := filepath.Rel(cwd, ap)
-	if err != nil {
-		return false
-	}
-	rel = filepath.Clean(rel)
-	return rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".."
-}
-
-func opList(target string) (string, error) {
-	dir := target
-	if dir == "" {
-		dir = "."
-	}
-	dir = absPath(dir)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
-	}
-	var b strings.Builder
-	b.WriteString(dir + "\n")
-	for _, e := range entries {
-		info, _ := e.Info()
-		name := e.Name()
-		if e.IsDir() {
-			name += string(os.PathSeparator)
-		}
-		size := int64(0)
-		mode := ""
-		if info != nil {
-			size = info.Size()
-			mode = info.Mode().String()
-		}
-		b.WriteString(fmt.Sprintf("%s  %12d  %s\n", mode, size, name))
-	}
-	return b.String(), nil
-}
-
-func opCreate(target string) (string, error) {
-	if target == "" {
-		return "", errors.New("missing target")
-	}
-	// Safety: only allow create inside CWD (prevents weird absolute paths from prompt mode).
-	p := absPath(target)
-	if !isWithinCWD(p) {
-		return "", errors.New("refusing create outside working directory (use CLI for absolute paths)")
-	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL, 0644)
-	if err != nil {
-		return "", err
-	}
-	_ = f.Close()
-	return "created: " + p + "\n", nil
-}
-
-func opDelete(target string) (string, error) {
-	if target == "" {
-		return "", errors.New("missing target")
-	}
-	// Safety: only allow delete inside CWD (prompt mode should not be able to nuke arbitrary paths).
-	p := absPath(target)
-	if !isWithinCWD(p) {
-		return "", errors.New("refusing delete outside working directory (use CLI if you really mean it)")
-	}
-	err := os.RemoveAll(p)
-	if err != nil {
-		return "", err
-	}
-	return "deleted: " + p + "\n", nil
-}
-
-func opFind(target string) (string, error) {
-	needle := strings.TrimSpace(target)
-	if needle == "" {
-		return "", errors.New("missing target")
-	}
-	root := "."
-	var hits []string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+func openLedger(f *flags, mode ledgerMode) (*ledger.Ledger, *ledger.HomeLock, int) {
+	if mode != ledgerCreate {
+		info, err := os.Stat(f.home)
 		if err != nil {
-			return nil
-		}
-		if strings.Contains(strings.ToLower(filepath.Base(path)), strings.ToLower(needle)) {
-			hits = append(hits, path)
-		}
-		if len(hits) > 2000 {
-			return fs.SkipAll
-		}
-		return nil
-	})
-	sort.Strings(hits)
-	if len(hits) == 0 {
-		return "no matches\n", nil
-	}
-	var b strings.Builder
-	for _, h := range hits {
-		b.WriteString(h + "\n")
-	}
-	return b.String(), nil
-}
-
-func opCheck(target string) (string, error) {
-	if target == "" {
-		return "", errors.New("missing target")
-	}
-	p := absPath(target)
-	if fileExists(p) {
-		return "exists: " + p + "\n", nil
-	}
-	return "missing: " + p + "\n", nil
-}
-
-func opOpen(target string) (string, error) {
-	// "Open" is environment-specific; we just report the path and refuse to spawn by default.
-	if target == "" {
-		return "", errors.New("missing target")
-	}
-	return "open requested: " + absPath(target) + "\n(re-run with CLI command to launch editor/viewer)\n", nil
-}
-
-func runInternalOp(intent, target string) (string, error) {
-	switch intent {
-	case "list":
-		return opList(target)
-	case "create":
-		return opCreate(target)
-	case "delete":
-		return opDelete(target)
-	case "find":
-		return opFind(target)
-	case "check":
-		return opCheck(target)
-	case "open":
-		return opOpen(target)
-	default:
-		return "", fmt.Errorf("unsupported internal op: %s", intent)
-	}
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// GATEWAY ENGINE
-// ════════════════════════════════════════════════════════════════════════════
-
-type Gateway struct {
-	state       *State
-	transitions []*Transition
-	domain      string
-	execute     bool
-	fixMode     bool
-	yes         bool
-}
-
-func NewGateway(domain string, execute bool, fixMode bool, yes bool) *Gateway {
-	return &Gateway{
-		state:       newState(traceID()),
-		transitions: []*Transition{},
-		domain:      domain,
-		execute:     execute,
-		fixMode:     fixMode,
-		yes:         yes,
-	}
-}
-
-func (g *Gateway) transition(to Stage, action string) {
-	t := &Transition{
-		From:      g.state.Stage,
-		To:        to,
-		Action:    action,
-		Timestamp: nowUTC(),
-	}
-	g.transitions = append(g.transitions, t)
-	g.state = g.state.advance(to)
-}
-
-func (g *Gateway) detectDomain(raw []string) string {
-	if g.domain != "auto" {
-		return g.domain
-	}
-	text := strings.ToLower(strings.Join(raw, " "))
-	if strings.Contains(text, "install") || strings.Contains(text, "package") {
-		return "env"
-	}
-	if len(raw) > 0 {
-		if which(raw[0]) != "" {
-			return "cli"
-		}
-		if fileExists(raw[0]) {
-			return "cli"
-		}
-	}
-	for _, p := range promptPatterns {
-		if p.re.MatchString(text) {
-			return "prompt"
-		}
-	}
-	return "cli"
-}
-
-func (g *Gateway) Process(raw []string) *Receipt {
-	startTime := nowUTC()
-
-	if len(raw) == 0 {
-		return g.makeReceipt(startTime, raw)
-	}
-
-	g.state.Raw = raw
-	g.transition(NASCENT, "input_received")
-
-	domain := g.detectDomain(raw)
-
-	var id *Identity
-	switch domain {
-	case "cli":
-		id = identifyCLI(raw)
-	case "prompt":
-		id = identifyPrompt(raw)
-	case "env":
-		id = identifyEnv(raw)
-	default:
-		id = identifyCLI(raw)
-	}
-
-	if id == nil {
-		g.transition(VOID, "input_null")
-		return g.makeReceipt(startTime, raw)
-	}
-
-	g.state.Identity = id
-	g.transition(DECLARED, "identity_assigned:"+domain)
-
-	var m *Meaning
-	switch domain {
-	case "cli":
-		m = canonicalizeCLI(id)
-	case "prompt":
-		m = canonicalizePrompt(id)
-	case "env":
-		m = canonicalizeEnv(id)
-	}
-
-	g.state.Meaning = m
-	g.transition(CANONICAL, "meaning_resolved")
-
-	var reqs map[string]*Req
-	switch domain {
-	case "cli":
-		reqs = checkRequirementsCLI(m, id)
-	case "prompt":
-		reqs = checkRequirementsPrompt(m, g.yes)
-	case "env":
-		reqs = checkRequirementsEnv(m, g.yes)
-	}
-
-	g.state.Requirements = reqs
-	g.transition(GATED, "requirements_checked")
-
-	allMet := true
-	for _, req := range reqs {
-		if !req.Met {
-			allMet = false
-			break
-		}
-	}
-
-	if !allMet {
-		refs := identifyRefinements(reqs)
-		g.state.Refinements = refs
-		g.transition(REFINABLE, "refinements_identified")
-
-		// Fix mode: apply ONLY guaranteed-safe refinements automatically.
-		if g.fixMode {
-			for _, ref := range refs {
-				if ref.Type == "path_resolution" && ref.Resolved != "" && domain == "cli" {
-					m.Resolved = ref.Resolved
-					if len(m.Command) > 0 {
-						m.Command[0] = ref.Resolved
-					}
-					if r, ok := reqs["target_exists"]; ok {
-						r.Met = true
-						r.Path = ref.Resolved
-					}
-					if r, ok := reqs["target_executable"]; ok {
-						r.Met = isExecutableFile(ref.Resolved)
-						r.Path = ref.Resolved
-					}
-				}
+			if os.IsNotExist(err) {
+				message := fmt.Sprintf("evidence directory does not exist at %s; initialize one explicitly with ueg identity init", f.home)
+				return nil, nil, cliError(f.jsonOut, "EVIDENCE_NOT_FOUND", message, 1)
 			}
-			// re-evaluate
-			allMet = true
-			for _, req := range reqs {
-				if !req.Met {
-					allMet = false
-					break
-				}
+			return nil, nil, cliError(f.jsonOut, "EVIDENCE_OPEN_FAILED", "cannot inspect the evidence directory: "+err.Error(), 1)
+		}
+		if !info.IsDir() {
+			return nil, nil, cliError(f.jsonOut, "EVIDENCE_PATH_INVALID", "evidence path is not a directory: "+f.home, 1)
+		}
+	}
+	createLock := mode == ledgerCreate || mode == ledgerExistingWrite || mode == ledgerRecover
+	var lock *ledger.HomeLock
+	var err error
+	if mode == ledgerExistingWrite || mode == ledgerRecover {
+		// Homes created before locking was introduced have no lock file. Verify
+		// them without mutation before creating one, so a failed replay remains
+		// an information-only refusal rather than changing untrusted evidence.
+		lock, err = ledger.AcquireHomeLock(f.home, false)
+		if err == nil && lock == nil {
+			if verifyErr := verifyExistingEvidence(f.home); verifyErr != nil {
+				return nil, nil, cliError(f.jsonOut, "EVIDENCE_VERIFICATION_FAILED", "stored evidence failed verification: "+verifyErr.Error(), 1)
 			}
-			if allMet {
-				g.transition(GATED, "refinements_applied")
-			}
+			lock, err = ledger.AcquireHomeLock(f.home, true)
 		}
+	} else {
+		lock, err = ledger.AcquireHomeLock(f.home, createLock)
 	}
-
-	if !allMet {
-		return g.makeReceipt(startTime, raw)
-	}
-
-	// GATED -> EXECUTABLE
-	if m.NonShellOp {
-		g.state.Execution = &Execution{Command: m.Command, Started: nowUTC()}
-		g.transition(EXECUTABLE, "internal_op_ready")
-		if !g.execute {
-			return g.makeReceipt(startTime, raw)
-		}
-		out := g.executeInternal(m.Intent, m.Target)
-		g.state.Output = out
-		g.transition(EXECUTED, "execution_complete")
-		g.transition(STABILIZED, "result_recorded")
-		return g.makeReceipt(startTime, raw)
-	}
-
-	if len(m.Command) == 0 || m.Command[0] == "" {
-		return g.makeReceipt(startTime, raw)
-	}
-
-	g.state.Execution = &Execution{Command: m.Command, Started: nowUTC()}
-	g.transition(EXECUTABLE, "command_ready")
-
-	if !g.execute {
-		return g.makeReceipt(startTime, raw)
-	}
-
-	output := g.executeCommand(m.Command)
-	g.state.Output = output
-	g.transition(EXECUTED, "execution_complete")
-
-	if output.ReturnCode != 0 {
-		if output.Stderr != "" {
-			output.ExternalRef = "EXECUTED_EXTERNAL_SIGNAL"
-		} else {
-			output.ExternalRef = "EXECUTED_PARTIAL_WORLD"
-		}
-	}
-
-	g.transition(STABILIZED, "result_recorded")
-
-	return g.makeReceipt(startTime, raw)
-}
-
-func (g *Gateway) executeInternal(intent, target string) *Output {
-	start := time.Now()
-	var out Output
-	stdout, err := runInternalOp(intent, target)
 	if err != nil {
-		out.ReturnCode = 1
-		out.Stderr = err.Error() + "\n"
-	} else {
-		out.ReturnCode = 0
-		out.Stdout = stdout
+		return nil, nil, cliError(f.jsonOut, "EVIDENCE_BUSY", "cannot use the evidence directory: "+err.Error(), 1)
 	}
-	out.DurationMs = time.Since(start).Milliseconds()
-	return &out
-}
-
-func (g *Gateway) executeCommand(cmd []string) *Output {
-	start := time.Now()
-
-	c := exec.Command(cmd[0], cmd[1:]...)
-	var outBytes, errBytes bytes.Buffer
-	c.Stdout = &outBytes
-	c.Stderr = &errBytes
-
-	err := c.Run()
-	duration := time.Since(start).Milliseconds()
-
-	exitCode := 0
+	if mode == ledgerExistingWrite && identity.IsBPlus(f.home) {
+		f.lifecycleFreshness = "LOCAL_ONLY_UNPROVEN"
+		if f.checkpoint != "" || f.trustStore != "" {
+			readOnly, readErr := ledger.OpenReadOnly(f.home)
+			if readErr != nil {
+				_ = lock.Release()
+				return nil, nil, cliError(f.jsonOut, "EVIDENCE_VERIFICATION_FAILED", readErr.Error(), 2)
+			}
+			if code := requireCurrentLifecycleForSigning(f, readOnly.IdentityState); code != 0 {
+				_ = lock.Release()
+				return nil, nil, code
+			}
+		}
+	}
+	var l *ledger.Ledger
+	switch mode {
+	case ledgerCreate:
+		l, err = ledger.Open(f.home)
+	case ledgerExistingWrite:
+		l, err = ledger.OpenExisting(f.home)
+	case ledgerRecover:
+		l, err = ledger.RecoverExisting(f.home)
+	case ledgerReadOnly:
+		l, err = ledger.OpenReadOnly(f.home)
+	case ledgerReadOnlyPrivate:
+		l, err = ledger.OpenReadOnlyWithPrivate(f.home)
+	}
 	if err != nil {
-		// Correct ExitError extraction
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ProcessState != nil {
-			exitCode = ee.ProcessState.ExitCode()
-		} else if c.ProcessState != nil {
-			exitCode = c.ProcessState.ExitCode()
-		} else {
-			exitCode = 1
+		_ = lock.Release()
+		if errors.Is(err, ledger.ErrRecoveryRequired) {
+			return nil, nil, cliError(f.jsonOut, "RECOVERY_REQUIRED", "an interrupted evidence write requires recovery; run ueg recover first", 1)
 		}
+		return nil, nil, cliError(f.jsonOut, "EVIDENCE_OPEN_FAILED", "cannot open the evidence directory: "+err.Error(), 1)
 	}
-
-	return &Output{
-		ReturnCode: exitCode,
-		Stdout:     outBytes.String(),
-		Stderr:     errBytes.String(),
-		DurationMs: duration,
-	}
+	return l, lock, 0
 }
 
-func (g *Gateway) makeReceipt(startTime string, input []string) *Receipt {
-	cwd, _ := os.Getwd()
-	r := &Receipt{
-		Version:     "1.1.0",
-		TraceID:     g.state.TraceID,
-		StartTime:   startTime,
-		EndTime:     nowUTC(),
-		Input:       input,
-		FinalStage:  g.state.Stage,
-		Transitions: g.transitions,
-		FinalState:  g.state,
-		Meta: &Meta{
-			UEGVersion: UEGVersion,
-			GOOS:       runtime.GOOS,
-			GOARCH:     runtime.GOARCH,
-			CWD:        cwd,
-		},
-	}
-	r.Checksum = r.computeChecksum()
-	r.DeterminismHash = r.computeDeterminismHash()
-	return r
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// VALIDATOR
-// ════════════════════════════════════════════════════════════════════════════
-
-type ValidationResult struct {
-	Valid  bool     `json:"valid"`
-	Proofs []string `json:"proofs"`
-}
-
-func Validate() *ValidationResult {
-	result := &ValidationResult{Valid: true, Proofs: []string{}}
-
-	for i, name := range stageNames {
-		ln := strings.ToLower(name)
-		if strings.Contains(ln, "error") || strings.Contains(ln, "fail") {
-			result.Valid = false
-			result.Proofs = append(result.Proofs, fmt.Sprintf("INVALID: error state found at ordinal %d", i))
-		}
-	}
-	if result.Valid {
-		result.Proofs = append(result.Proofs, "PROOF: no_error_states - verified across all 9 states")
-	}
-
-	if EXECUTABLE.Executable() && !GATED.Executable() && !REFINABLE.Executable() {
-		result.Proofs = append(result.Proofs, "PROOF: execution_gated - only EXECUTABLE is executable")
-	} else {
-		result.Valid = false
-		result.Proofs = append(result.Proofs, "INVALID: execution gating violated")
-	}
-
-	terminals := 0
-	for i := Stage(0); i <= STABILIZED; i++ {
-		if i.Terminal() {
-			terminals++
-		}
-	}
-	if terminals == 1 && STABILIZED.Terminal() {
-		result.Proofs = append(result.Proofs, "PROOF: single_terminal - only STABILIZED is terminal")
-	} else {
-		result.Valid = false
-		result.Proofs = append(result.Proofs, "INVALID: terminal state count mismatch")
-	}
-
-	result.Proofs = append(result.Proofs, fmt.Sprintf("PROOF: closed_state_space - exactly %d states defined", len(stageNames)))
-	result.Proofs = append(result.Proofs, "PROOF: forward_only - ordinals 0-8 monotonically increase")
-
-	return result
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// RENDERER
-// ════════════════════════════════════════════════════════════════════════════
-
-func Render(r *Receipt, verbose bool) string {
-	var b strings.Builder
-	s := r.FinalState
-
-	b.WriteString("\n")
-	b.WriteString("════════════════════════════════════════════════════════════════\n")
-	b.WriteString(fmt.Sprintf("  UEG  %s  %s\n", s.Stage.Symbol(), s.Stage.String()))
-	b.WriteString("════════════════════════════════════════════════════════════════\n")
-	b.WriteString(fmt.Sprintf("  Trace: %s\n", s.TraceID))
-	b.WriteString(fmt.Sprintf("  UEG:   %s (%s/%s)\n", UEGVersion, runtime.GOOS, runtime.GOARCH))
-
-	if verbose && len(r.Transitions) > 0 {
-		symbols := []string{}
-		for _, t := range r.Transitions {
-			symbols = append(symbols, t.To.Symbol())
-		}
-		b.WriteString(fmt.Sprintf("  Flow:  %s\n", strings.Join(symbols, " → ")))
-	}
-
-	b.WriteString("\n")
-
-	if s.Stage == STABILIZED && s.Output != nil {
-		out := strings.TrimRight(s.Output.Stdout, "\n")
-		if out != "" {
-			b.WriteString("  Output:\n")
-			lines := strings.Split(out, "\n")
-			for i, line := range lines {
-				if i >= 30 {
-					b.WriteString(fmt.Sprintf("    ... (%d more lines)\n", len(lines)-30))
-					break
-				}
-				b.WriteString(fmt.Sprintf("    %s\n", line))
-			}
-		}
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("  Duration: %dms\n", s.Output.DurationMs))
-		b.WriteString(fmt.Sprintf("  Exit: %d\n", s.Output.ReturnCode))
-		if s.Output.ExternalRef != "" {
-			b.WriteString(fmt.Sprintf("  External: %s\n", s.Output.ExternalRef))
-		}
-
-	} else if s.Stage == REFINABLE || s.Stage == GATED {
-		b.WriteString("  Status: Awaiting completion\n\n")
-
-		if s.Requirements != nil {
-			b.WriteString("  Requirements:\n")
-			keys := make([]string, 0, len(s.Requirements))
-			for k := range s.Requirements {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, name := range keys {
-				req := s.Requirements[name]
-				sym := "○"
-				if req.Met {
-					sym = "✓"
-				}
-				detail := ""
-				if req.Path != "" {
-					detail = fmt.Sprintf(" (%s)", req.Path)
-				} else if req.Package != "" {
-					detail = fmt.Sprintf(" (%s)", req.Package)
-				} else if req.Kind != "" {
-					detail = fmt.Sprintf(" (%s)", req.Kind)
-				}
-				b.WriteString(fmt.Sprintf("    %s %s%s\n", sym, name, detail))
-			}
-		}
-
-		if len(s.Refinements) > 0 {
-			b.WriteString("\n  To proceed:\n")
-			for _, ref := range s.Refinements {
-				switch ref.Type {
-				case "clarification_needed":
-					b.WriteString(fmt.Sprintf("    → %s\n", ref.Question))
-				case "confirmation_needed":
-					b.WriteString(fmt.Sprintf("    → %s\n", ref.Question))
-				case "install_available":
-					b.WriteString(fmt.Sprintf("    → %s\n", ref.Command))
-				case "path_resolution":
-					b.WriteString(fmt.Sprintf("    → Resolved: %s → %s\n", ref.Original, ref.Resolved))
-				}
-			}
-		}
-
-	} else if s.Stage == EXECUTABLE {
-		b.WriteString("  Status: Ready to execute\n")
-		if s.Execution != nil {
-			b.WriteString(fmt.Sprintf("  Command: %s\n", strings.Join(s.Execution.Command, " ")))
-		}
-
-	} else {
-		if s.Identity != nil {
-			b.WriteString(fmt.Sprintf("  Domain: %s\n", s.Identity.Domain))
-		}
-		if s.Meaning != nil {
-			if s.Meaning.Intent != "" {
-				b.WriteString(fmt.Sprintf("  Intent: %s\n", s.Meaning.Intent))
-			}
-			if s.Meaning.Target != "" {
-				b.WriteString(fmt.Sprintf("  Target: %s\n", s.Meaning.Target))
-			}
-		}
-	}
-
-	b.WriteString("\n════════════════════════════════════════════════════════════════\n\n")
-	return b.String()
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// CAPSULE (PORTABLE RECEIPT ARTIFACT)
-// ════════════════════════════════════════════════════════════════════════════
-
-func writeCapsule(zipPath string, receipt *Receipt) error {
-	// Deterministic capsule: fixed timestamps + stable entry order.
-	receiptJSON, err := json.MarshalIndent(receipt, "", "  ")
+func verifyExistingEvidence(home string) error {
+	l, err := ledger.OpenReadOnly(home)
 	if err != nil {
 		return err
 	}
-	metaJSON, _ := json.MarshalIndent(receipt.Meta, "", "  ")
-
-	zf, err := os.Create(zipPath)
-	if err != nil {
-		return err
+	chain := l.VerifyReceipts()
+	if !chain.OK {
+		return fmt.Errorf("stored receipt verification failed: %s", strings.Join(chain.Findings, "; "))
 	}
-	defer zf.Close()
-
-	zw := zip.NewWriter(zf)
-	defer zw.Close()
-
-	fixedTime := time.Unix(0, 0).UTC()
-
-	add := func(name string, b []byte, mode fs.FileMode) error {
-		h := &zip.FileHeader{
-			Name:     name,
-			Method:   zip.Deflate,
-			Modified: fixedTime,
-		}
-		h.SetMode(mode)
-		w, err := zw.CreateHeader(h)
-		if err != nil {
-			return err
-		}
-		_, err = w.Write(b)
-		return err
-	}
-
-	// Stable order
-	if err := add("receipt.json", receiptJSON, 0644); err != nil {
-		return err
-	}
-	if err := add("meta.json", metaJSON, 0644); err != nil {
-		return err
-	}
-	if receipt.FinalState != nil && receipt.FinalState.Output != nil {
-		_ = add("stdout.txt", []byte(receipt.FinalState.Output.Stdout), 0644)
-		_ = add("stderr.txt", []byte(receipt.FinalState.Output.Stderr), 0644)
+	bind := ledger.VerifyPetitions(l.Receipts(), l.Petitions())
+	if !bind.OK {
+		return fmt.Errorf("stored request verification failed: %s", strings.Join(bind.Findings, "; "))
 	}
 	return nil
 }
 
-func readReceiptFromPath(path string) (*Receipt, error) {
-	if strings.HasSuffix(strings.ToLower(path), ".zip") {
-		return readReceiptFromCapsule(path)
+func cmdRun(f *flags, dryRun bool) int {
+	if len(f.rest) == 0 {
+		return cliError(f.jsonOut, "USAGE", "no command given", 1)
 	}
-	b, err := os.ReadFile(path)
+	classification := policy.Classify(f.rest)
+	decision := policy.Decide(classification, f.posture, policy.Approvals{
+		Irrevocable: f.approve, Unclassified: f.allowUnclass,
+	})
+	if dryRun || decision.Outcome == policy.Refused {
+		return reportInertDecision(f, classification, decision, dryRun)
+	}
+	if code := requireBPlusForSigning(f); code != 0 {
+		return code
+	}
+	l, lock, code := openLedger(f, ledgerExistingWrite)
+	if l == nil {
+		return code
+	}
+	defer lock.Release()
+	opts := gateway.Options{
+		Posture: f.posture,
+		Approvals: policy.Approvals{
+			Irrevocable:  f.approve,
+			Unclassified: f.allowUnclass,
+		},
+		DryRun: dryRun,
+		Stream: !f.jsonOut && !dryRun,
+	}
+
+	res, err := gateway.Run(l, f.rest, opts)
 	if err != nil {
-		return nil, err
+		return cliError(f.jsonOut, "EXECUTION_FAILED", err.Error(), 1)
 	}
-	var r Receipt
-	if err := json.Unmarshal(b, &r); err != nil {
-		return nil, err
+
+	if f.jsonOut {
+		printJSON(map[string]any{
+			"evidence_home":        l.Home,
+			"signing_key_id":       l.KeyID,
+			"identity_created":     l.IdentityCreated,
+			"stage":                res.Stage.String(),
+			"stage_path":           res.Path,
+			"effect_class":         string(res.Classification.Class),
+			"rule_id":              res.Classification.RuleID,
+			"surface":              res.Classification.Surface,
+			"decision":             string(res.Decision.Outcome),
+			"reason":               res.Decision.Reason,
+			"posture":              string(res.Decision.Posture),
+			"executed":             res.Executed,
+			"exit_code":            res.ExitCode,
+			"stdout_sha256":        res.StdoutSHA256,
+			"stderr_sha256":        res.StderrSHA256,
+			"stdout_bytes":         res.StdoutBytes,
+			"stderr_bytes":         res.StderrBytes,
+			"stdout_truncated":     res.StdoutTruncated,
+			"stderr_truncated":     res.StderrTruncated,
+			"duration_ms":          res.DurationMs,
+			"admission_receipt_id": receiptID(res.AdmissionReceipt),
+			"outcome_receipt_id":   receiptID(res.OutcomeReceipt),
+			"stdout":               res.Stdout,
+			"stderr":               res.Stderr,
+			"lifecycle_freshness":  f.lifecycleFreshness,
+		})
+		return res.ExitCode
 	}
-	return &r, nil
+
+	if res.Decision.Outcome == policy.Refused {
+		fmt.Fprintf(os.Stderr, "ueg: REFUSED  %s\n", strings.Join(f.rest, " "))
+		fmt.Fprintf(os.Stderr, "     effect  %s (%s)\n", res.Classification.Class, res.Classification.RuleID)
+		fmt.Fprintf(os.Stderr, "     because %s\n", res.Decision.Reason)
+		fmt.Fprintf(os.Stderr, "     receipt %s\n", short(receiptID(res.AdmissionReceipt)))
+		return res.ExitCode
+	}
+
+	if dryRun {
+		fmt.Printf("ueg: %s\n", strings.Join(f.rest, " "))
+		fmt.Printf("     effect   %s (%s)\n", res.Classification.Class, res.Classification.RuleID)
+		fmt.Printf("     decision %s — %s\n", res.Decision.Outcome, res.Decision.Reason)
+		fmt.Printf("     stage    %s (not executed: check only)\n", res.Stage)
+		fmt.Printf("     receipt  %s\n", short(receiptID(res.AdmissionReceipt)))
+		return 0
+	}
+
+	// The command's own output already streamed; the evidence line goes to
+	// stderr so pipelines see only what the command produced.
+	fmt.Fprintf(os.Stderr, "ueg: %s %s exit=%d receipts=%s,%s freshness=%s\n",
+		res.Classification.Class, res.Stage, res.ExitCode,
+		short(receiptID(res.AdmissionReceipt)), short(receiptID(res.OutcomeReceipt)), f.lifecycleFreshness)
+	return res.ExitCode
 }
 
-func readReceiptFromCapsule(zipPath string) (*Receipt, error) {
-	zr, err := zip.OpenReader(zipPath)
+func reportInertDecision(f *flags, class policy.Classification, decision policy.Decision, dryRun bool) int {
+	if f.jsonOut {
+		printJSON(map[string]any{
+			"effect_class": class.Class, "rule_id": class.RuleID, "surface": class.Surface,
+			"decision": decision.Outcome, "reason": decision.Reason, "posture": decision.Posture,
+			"executed": false, "state_changed": false, "evidence_recorded": false,
+			"mode": map[bool]string{true: "check", false: "refusal"}[dryRun],
+		})
+	} else if dryRun {
+		fmt.Printf("ueg: %s\n", strings.Join(f.rest, " "))
+		fmt.Printf("     effect   %s (%s)\n", class.Class, class.RuleID)
+		fmt.Printf("     decision %s — %s\n", decision.Outcome, decision.Reason)
+		fmt.Println("     state    unchanged (check does not create or record evidence)")
+	} else {
+		fmt.Fprintf(os.Stderr, "ueg: REFUSED  %s\n", strings.Join(f.rest, " "))
+		fmt.Fprintf(os.Stderr, "     effect  %s (%s)\n", class.Class, class.RuleID)
+		fmt.Fprintf(os.Stderr, "     because %s\n", decision.Reason)
+		fmt.Fprintln(os.Stderr, "     state   unchanged; the command did not start")
+	}
+	if decision.Outcome == policy.Refused {
+		return 77
+	}
+	return 0
+}
+
+func requireBPlusForSigning(f *flags) int {
+	info, err := os.Stat(f.home)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return cliError(f.jsonOut, "IDENTITY_NOT_INITIALIZED",
+				fmt.Sprintf("no evidence identity exists at %s; run ueg identity init --home %q --recovery-package <offline-path>", f.home, f.home), 1)
+		}
+		return cliError(f.jsonOut, "EVIDENCE_OPEN_FAILED", "cannot inspect the evidence home: "+err.Error(), 1)
 	}
-	defer zr.Close()
-
-	for _, f := range zr.File {
-		if f.Name != "receipt.json" {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return nil, err
-		}
-		defer rc.Close()
-		b, _ := io.ReadAll(rc)
-		var r Receipt
-		if err := json.Unmarshal(b, &r); err != nil {
-			return nil, err
-		}
-		return &r, nil
+	if !info.IsDir() {
+		return cliError(f.jsonOut, "EVIDENCE_PATH_INVALID", "evidence path is not a directory: "+f.home, 1)
 	}
-	return nil, errors.New("capsule missing receipt.json")
+	if !identity.IsBPlus(f.home) {
+		return cliError(f.jsonOut, "LEGACY_MIGRATION_REQUIRED",
+			"this is a legacy evidence home; independently confirm its signing-key fingerprint, then run ueg identity migrate before creating new evidence", 1)
+	}
+	return 0
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// REPLAY
-// ════════════════════════════════════════════════════════════════════════════
-
-func Replay(receiptPath string, execute bool, fixMode bool, yes bool) (*Receipt, bool, string) {
-	original, err := readReceiptFromPath(receiptPath)
+func requireCurrentLifecycleForSigning(f *flags, local *identity.State) int {
+	if f.checkpoint != "" && f.trustStore != "" {
+		return cliError(f.jsonOut, "USAGE", "choose either --checkpoint or --trust-store", 1)
+	}
+	external, err := loadExternalLifecycleState(f.checkpoint, f.trustStore, local.Genesis.IdentityID)
 	if err != nil {
-		return nil, false, "READ_FAIL"
+		return cliError(f.jsonOut, "EXTERNAL_CHECKPOINT_INVALID", err.Error(), 2)
 	}
-	if !original.verifyChecksum() {
-		// Receipt was modified or corrupted; replay anyway but signal tamper.
-		gw := NewGateway("auto", execute, fixMode, yes)
-		replayed := gw.Process(original.Input)
-		return replayed, false, "TAMPERED"
+	relation, err := identity.CompareLifecycleStates(local, external)
+	if err != nil {
+		return cliError(f.jsonOut, "LIFECYCLE_FORK", err.Error()+"; refusing to sign", 2)
 	}
-
-	gw := NewGateway("auto", execute, fixMode, yes)
-	replayed := gw.Process(original.Input)
-
-	// Determinism: compare canonical decision hash (ignores timestamps/trace/output text).
-	if original.DeterminismHash != "" {
-		if replayed.computeDeterminismHash() != original.DeterminismHash {
-			return replayed, false, "DIVERGED"
-		}
+	if relation == "LOCAL_STALE" {
+		return cliError(f.jsonOut, "STALE_IDENTITY_STATE", "a newer authenticated lifecycle exists; refusing to sign from this stale home", 2)
 	}
-
-	// Extra safety: verify stage flow matches (from/to/action), ignoring timestamps.
-	if len(replayed.Transitions) != len(original.Transitions) {
-		return replayed, false, "DIVERGED"
-	}
-	for i, t := range replayed.Transitions {
-		o := original.Transitions[i]
-		if t.From != o.From || t.To != o.To || t.Action != o.Action {
-			return replayed, false, "DIVERGED"
-		}
-	}
-	return replayed, true, "MATCH"
+	f.lifecycleFreshness = relation + "_OFFLINE_FRESHNESS_UNPROVEN"
+	return 0
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// CLI
-// ════════════════════════════════════════════════════════════════════════════
-
-func printUsage() {
-	fmt.Println(`UEG - Universal Execution Gateway
-
-Usage:
-  ueg <command> [args...]                   Execute command
-  ueg --prompt "<request>"                  Natural language (safe internal ops: list/create/find/check/open; delete requires --yes)
-  ueg --env "<package spec>"                Environment/packages (pip install proposals; requires --yes to actually run)
-  ueg --check <command> [args...]           Preflight only
-  ueg --fix <command|--prompt|--env>        Apply ONLY guaranteed-safe refinements
-  ueg --yes ...                             Confirm dangerous actions (delete/install/execute in prompt/env)
-  ueg --validate                            Prove state model
-  ueg --replay <receipt.json|capsule.zip>   Replay from receipt/capsule
-  ueg --receipt <receipt.json> ...          Save receipt to file
-  ueg --capsule <capsule.zip> ...           Save portable capsule zip
-  ueg --json ...                            Print receipt JSON (machine-readable)
-
-Environment:
-  UEG_VERBOSE=1                             Show state flow`)
+func cmdReplay(f *flags) int {
+	if code := requireBPlusForSigning(f); code != 0 {
+		return code
+	}
+	l, lock, code := openLedger(f, ledgerExistingWrite)
+	if l == nil {
+		return code
+	}
+	defer lock.Release()
+	selector := "last"
+	if len(f.rest) > 0 {
+		selector = f.rest[0]
+	}
+	res, err := gateway.Replay(l, selector, gateway.Options{
+		Posture:   f.posture,
+		Approvals: policy.Approvals{Irrevocable: f.approve, Unclassified: f.allowUnclass},
+	})
+	if err != nil {
+		return cliError(f.jsonOut, "REPLAY_FAILED", err.Error(), 1)
+	}
+	res.LifecycleFreshness = f.lifecycleFreshness
+	if f.jsonOut {
+		printJSON(res)
+	} else {
+		fmt.Printf("REPLAY: %s\n", res.Verdict)
+		fmt.Printf("  target  %s\n", res.Target)
+		fmt.Printf("  reason  %s\n", res.Reason)
+		for _, d := range res.Differences {
+			fmt.Printf("  differs %s\n", d)
+		}
+		for _, c := range res.ChainFindings {
+			fmt.Printf("  chain   %s\n", c)
+		}
+	}
+	switch res.Verdict {
+	case gateway.Match, gateway.RefusalConfirmed, gateway.CheckConfirmed:
+		return 0
+	case gateway.RefusedReplay:
+		return 77
+	case gateway.Incomplete:
+		return 3
+	default:
+		return 2
+	}
 }
 
-func main() {
-	args := os.Args[1:]
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		printUsage()
-		os.Exit(0)
+func cmdExport(f *flags) int {
+	if len(f.rest) == 0 {
+		return cliError(f.jsonOut, "USAGE", "export needs an output path", 1)
+	}
+	l, lock, code := openLedger(f, ledgerReadOnlyPrivate)
+	if l == nil {
+		return code
+	}
+	defer lock.Release()
+	if l.PendingRecovery {
+		return cliError(f.jsonOut, "RECOVERY_REQUIRED", "export is blocked by an interrupted evidence write; run ueg recover first", 1)
+	}
+	out := f.rest[0]
+	if err := bundle.Build(l, out); err != nil {
+		code := "EXPORT_FAILED"
+		switch {
+		case errors.Is(err, bundle.ErrDestinationExists):
+			code = "EXPORT_DESTINATION_EXISTS"
+		case errors.Is(err, bundle.ErrEvidenceInvalid):
+			code = "EXPORT_EVIDENCE_INVALID"
+		case errors.Is(err, bundle.ErrExportTooLarge):
+			code = "EXPORT_TOO_LARGE"
+		}
+		return cliError(f.jsonOut, code, err.Error(), 1)
+	}
+	if f.jsonOut {
+		printJSON(map[string]any{"bundle": out, "receipts": len(l.Receipts()), "signing_key_id": l.KeyID})
+	} else {
+		fmt.Printf("wrote %s (%d receipts, signed by %s)\n", out, len(l.Receipts()), l.KeyID)
+		fmt.Printf("verify it with:  ueg verify %s\n", out)
+	}
+	return 0
+}
+
+func cmdVerify(f *flags) int {
+	if len(f.rest) == 0 {
+		return cliError(f.jsonOut, "USAGE", "verify needs a bundle path", 1)
+	}
+	if f.expectedKey != "" && f.expectedIdentity != "" {
+		return cliError(f.jsonOut, "USAGE", "choose either --expected-key-id for legacy evidence or --expected-identity-id for B+ evidence", 1)
+	}
+	if (f.minimumCheckpointSequence == nil) != (f.minimumCheckpointDigest == "") {
+		return cliError(f.jsonOut, "USAGE", "--minimum-checkpoint-sequence and --minimum-checkpoint-digest must be supplied together", 1)
+	}
+	res := bundle.VerifyWithOptions(f.rest[0], bundle.Options{
+		ExpectedKeyID: f.expectedKey, ExpectedIdentityID: f.expectedIdentity,
+		ExternalCheckpointPath: f.checkpoint, ExternalAnchorPath: f.anchor, TrustStore: f.trustStore,
+		MinimumCheckpointSequence: f.minimumCheckpointSequence, MinimumCheckpointDigest: f.minimumCheckpointDigest,
+		RequireCurrentStatus: f.requireCurrentStatus,
+	})
+	if f.jsonOut {
+		printJSON(res)
+	} else if res.BundleVersion == "bplus-v1" {
+		fmt.Printf("%s: %s\n", res.OverallTrust, res.Reason)
+		fmt.Printf("  identity     %s\n", res.IdentityID)
+		fmt.Printf("  lifecycle    %d %s\n", res.LifecycleSequence, res.LifecycleDigest)
+		fmt.Printf("  signatures   %s\n", res.Signature)
+		fmt.Printf("  ledger       %s\n", res.BundleLedgerIntegrity)
+		fmt.Printf("  identity     %s\n", res.IdentityContinuity)
+		fmt.Printf("  lifecycle    %s\n", res.LifecycleChain)
+		fmt.Printf("  key status   %s\n", res.SigningKeyStatus)
+		fmt.Printf("  checkpoint   %s / %s / freshness %s\n", res.CheckpointAuthenticity, res.CheckpointSource, res.CheckpointFreshness)
+		fmt.Printf("  time         %s\n", res.EvidenceTimeAssurance)
+	} else if res.OK {
+		fmt.Println(res.TrustVerdict)
+		for _, c := range res.Checks {
+			fmt.Println("  ✓", c)
+		}
+		fmt.Printf("  %d receipts, signed by %s\n", res.ReceiptCount, strings.Join(res.SigningKeyIDs, ", "))
+	} else {
+		fmt.Println("INVALID:", res.Reason)
+	}
+	if res.BundleVersion == "bplus-v1" {
+		if res.OverallTrust == bundle.OverallVerified {
+			return 0
+		}
+		return 2
+	}
+	if res.OK {
+		return 0
+	}
+	return 2
+}
+
+func cmdLedger(f *flags) int {
+	l, lock, code := openLedger(f, ledgerReadOnly)
+	if l == nil {
+		return code
+	}
+	defer lock.Release()
+	chain := l.VerifyReceipts()
+	bind := ledger.VerifyPetitions(l.Receipts(), l.Petitions())
+
+	if f.jsonOut {
+		printJSON(map[string]any{
+			"home":              f.home,
+			"signing_key_id":    l.KeyID,
+			"receipts":          l.Receipts(),
+			"chain_ok":          chain.OK && bind.OK,
+			"recovery_required": l.PendingRecovery,
+			"findings":          append(chain.Findings, bind.Findings...),
+		})
+		if chain.OK && bind.OK && !l.PendingRecovery {
+			return 0
+		}
+		return 2
 	}
 
-	verbose := os.Getenv("UEG_VERBOSE") == "1"
-	execute := true
-	domain := "auto"
-	fixMode := false
-	yes := false
-	jsonOut := false
-	var receiptPath string
-	var capsulePath string
+	fmt.Printf("evidence  %s\n", f.home)
+	fmt.Printf("key       %s\n", l.KeyID)
+	fmt.Printf("receipts  %d\n\n", len(l.Receipts()))
+	if l.PendingRecovery {
+		fmt.Println("recovery  REQUIRED (an interrupted evidence write is pending; run ueg recover)")
+	}
+	for _, r := range l.Receipts() {
+		fmt.Printf("  %3d  %s  %-9s %-9s  %s\n", r.SequenceNo, short(r.ReceiptID),
+			r.AdmissionOutcome, r.ExpressionOutcome, truncate(r.PetitionSummary.Target, 48))
+	}
+	fmt.Println()
+	if chain.OK && bind.OK && !l.PendingRecovery {
+		fmt.Printf("chain     OK (%d receipts re-derived and verified)\n", chain.Checked)
+		return 0
+	}
+	if chain.OK && bind.OK {
+		fmt.Printf("chain     OK (%d receipts re-derived and verified), but recovery is required\n", chain.Checked)
+		return 2
+	}
+	fmt.Println("chain     FAILED")
+	for _, msg := range append(chain.Findings, bind.Findings...) {
+		fmt.Println("         ", msg)
+	}
+	return 2
+}
 
-	// Parse flags (simple; keeps binary tiny)
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "--check":
-			execute = false
-			args = append(args[:i], args[i+1:]...)
-		case "--fix":
-			fixMode = true
-			args = append(args[:i], args[i+1:]...)
-		case "--yes":
-			yes = true
-			args = append(args[:i], args[i+1:]...)
-		case "--prompt":
-			domain = "prompt"
-			args = append(args[:i], args[i+1:]...)
-		case "--env":
-			domain = "env"
-			args = append(args[:i], args[i+1:]...)
-		case "--verbose":
-			verbose = true
-			args = append(args[:i], args[i+1:]...)
-		case "--json":
-			jsonOut = true
-			args = append(args[:i], args[i+1:]...)
-		case "--validate":
-			result := Validate()
-			data, _ := json.MarshalIndent(result, "", "  ")
-			fmt.Println(string(data))
-			if result.Valid {
-				os.Exit(0)
+func cmdRecover(f *flags) int {
+	identityRecovered := false
+	if pending, inspectErr := identity.InitializationPending(f.home); inspectErr != nil {
+		return cliError(f.jsonOut, "RECOVERY_STATE_UNAVAILABLE", "cannot inspect initialization recovery state: "+inspectErr.Error(), 1)
+	} else if pending {
+		state, recoverErr := identity.RecoverPendingInitialization(f.home, nil)
+		if recoverErr != nil && !errors.Is(recoverErr, identity.ErrInitializationRolledBack) {
+			return cliError(f.jsonOut, "IDENTITY_RECOVERY_FAILED", recoverErr.Error(), 1)
+		}
+		if errors.Is(recoverErr, identity.ErrInitializationRolledBack) {
+			if f.jsonOut {
+				printJSON(map[string]any{"home": f.home, "recovered": false, "needed": true, "initialization_rolled_back": true})
+			} else {
+				fmt.Println("The interrupted initialization was rolled back. No evidence identity was created.")
 			}
-			os.Exit(1)
-		case "--replay":
-			if i+1 >= len(args) {
-				fmt.Println("Missing receipt path")
-				os.Exit(1)
+			return 0
+		}
+		if state == nil {
+			return cliError(f.jsonOut, "IDENTITY_RECOVERY_FAILED", "initialization recovery returned no identity state", 1)
+		}
+		identityRecovered = true
+	}
+	if pending, inspectErr := identity.MigrationPending(f.home); inspectErr != nil {
+		return cliError(f.jsonOut, "RECOVERY_STATE_UNAVAILABLE", "cannot inspect migration recovery state: "+inspectErr.Error(), 1)
+	} else if pending {
+		lock, lockErr := ledger.AcquireHomeLock(f.home, false)
+		if lockErr != nil || lock == nil {
+			return cliError(f.jsonOut, "EVIDENCE_BUSY", "cannot lock the evidence home for migration recovery", 1)
+		}
+		_, recoverErr := identity.RecoverPendingMigration(f.home)
+		_ = lock.Release()
+		if recoverErr != nil && !errors.Is(recoverErr, identity.ErrMigrationRolledBack) {
+			return cliError(f.jsonOut, "IDENTITY_RECOVERY_FAILED", recoverErr.Error(), 1)
+		}
+		identityRecovered = true
+	}
+	if identity.IsBPlus(f.home) {
+		pending, inspectErr := identity.MutationPending(f.home)
+		if inspectErr != nil {
+			return cliError(f.jsonOut, "RECOVERY_STATE_UNAVAILABLE", "cannot inspect identity recovery state: "+inspectErr.Error(), 1)
+		}
+		if pending {
+			lock, lockErr := ledger.AcquireHomeLock(f.home, false)
+			if lockErr != nil || lock == nil {
+				return cliError(f.jsonOut, "EVIDENCE_BUSY", "cannot lock the evidence home for lifecycle recovery", 1)
 			}
-			receipt, match, code := Replay(args[i+1], execute, fixMode, yes)
-			switch code {
-			case "TAMPERED":
-				fmt.Println("REPLAY: RECEIPT TAMPERED (checksum mismatch)")
-			case "MATCH":
-				fmt.Println("REPLAY: DETERMINISTIC - state paths match")
-			default:
-				fmt.Println("REPLAY: DIVERGED - state paths differ")
+			_, recoverErr := identity.RecoverPendingMutation(f.home)
+			_ = lock.Release()
+			if recoverErr != nil {
+				return cliError(f.jsonOut, "IDENTITY_RECOVERY_FAILED", recoverErr.Error(), 1)
 			}
-			if jsonOut {
-				data, _ := json.MarshalIndent(receipt, "", "  ")
-				fmt.Println(string(data))
-				os.Exit(0)
-			}
-			fmt.Print(Render(receipt, verbose))
-			if match && receipt.FinalStage == STABILIZED && receipt.FinalState != nil && receipt.FinalState.Output != nil {
-				os.Exit(receipt.FinalState.Output.ReturnCode)
-			}
-			os.Exit(0)
-		case "--receipt":
-			if i+1 >= len(args) {
-				fmt.Println("Missing receipt path")
-				os.Exit(1)
-			}
-			receiptPath = args[i+1]
-			args = append(args[:i], args[i+2:]...)
-		case "--capsule":
-			if i+1 >= len(args) {
-				fmt.Println("Missing capsule path")
-				os.Exit(1)
-			}
-			capsulePath = args[i+1]
-			args = append(args[:i], args[i+2:]...)
-		default:
-			i++
+			identityRecovered = true
 		}
 	}
+	needed, err := ledger.RecoveryPending(f.home)
+	if err != nil {
+		return cliError(f.jsonOut, "RECOVERY_STATE_UNAVAILABLE", "cannot inspect recovery state: "+err.Error(), 1)
+	}
+	mode := ledgerReadOnly
+	if needed {
+		mode = ledgerRecover
+	}
+	l, lock, code := openLedger(f, mode)
+	if l == nil {
+		return code
+	}
+	defer lock.Release()
+	chain := l.VerifyReceipts()
+	bind := ledger.VerifyPetitions(l.Receipts(), l.Petitions())
+	ok := chain.OK && bind.OK && !l.PendingRecovery
+	if f.jsonOut {
+		printJSON(map[string]any{
+			"home":      f.home,
+			"recovered": (needed || identityRecovered) && ok,
+			"needed":    needed || identityRecovered,
+			"chain_ok":  ok,
+			"findings":  append(chain.Findings, bind.Findings...),
+		})
+	} else if !needed && !identityRecovered && ok {
+		fmt.Println("No recovery was needed. The evidence chain verifies.")
+	} else if ok {
+		fmt.Println("Recovery completed. The evidence chain verifies.")
+	} else {
+		fmt.Println("Recovery could not establish a valid evidence chain.")
+	}
+	if ok {
+		return 0
+	}
+	return 2
+}
 
-	if len(args) == 0 {
-		printUsage()
-		os.Exit(0)
+func cmdPolicy(f *flags) int {
+	cmds := []string{
+		"echo hello", "ls -la", "git status", "git push", "git push --force",
+		"curl https://example.com", "pip install requests", "sudo apt install nginx",
+		"rm -rf build", "rm -rf /", "mkfs.ext4 /dev/sda1", "sh -c 'echo hi'",
+	}
+	if len(f.rest) > 0 {
+		cmds = []string{strings.Join(f.rest, " ")}
+	}
+	rows := make([]map[string]any, 0, len(cmds))
+	for _, c := range cmds {
+		argv := strings.Fields(c)
+		cl := policy.Classify(argv)
+		d := policy.Decide(cl, f.posture, policy.Approvals{Irrevocable: f.approve, Unclassified: f.allowUnclass})
+		rows = append(rows, map[string]any{
+			"command": c, "class": string(cl.Class), "rule_id": cl.RuleID,
+			"surface": cl.Surface, "decision": string(d.Outcome),
+		})
+	}
+	if f.jsonOut {
+		printJSON(map[string]any{
+			"rules_version": policy.RulesVersion(),
+			"rules_hash":    policy.RulesHash,
+			"rule_count":    policy.RuleCount(),
+			"posture":       string(f.posture),
+			"examples":      rows,
+		})
+		return 0
+	}
+	fmt.Printf("rules v%s  %d rules  %s  posture=%s\n\n", policy.RulesVersion(), policy.RuleCount(), policy.RulesHash[:12], f.posture)
+	for _, r := range rows {
+		fmt.Printf("  %-9s %-9s %-24s %s\n", r["decision"], r["class"], r["rule_id"], r["command"])
+	}
+	return 0
+}
+
+// cmdValidate states the properties of the state model and checks them against
+// the code rather than asserting them in prose.
+func cmdValidate(f *flags) int {
+	stages := []gateway.Stage{
+		gateway.VOID, gateway.NASCENT, gateway.DECLARED, gateway.CANONICAL,
+		gateway.GATED, gateway.EXECUTABLE, gateway.EXECUTED, gateway.STABILIZED,
 	}
 
-	gw := NewGateway(domain, execute, fixMode, yes)
-	receipt := gw.Process(args)
+	var proofs []string
+	valid := true
 
-	// Save receipt/capsule if requested
-	if receiptPath != "" {
-		data, _ := json.MarshalIndent(receipt, "", "  ")
-		_ = os.WriteFile(receiptPath, data, 0644)
-	}
-	if capsulePath != "" {
-		_ = writeCapsule(capsulePath, receipt)
-	}
-
-	// Machine-readable output
-	if jsonOut {
-		data, _ := json.MarshalIndent(receipt, "", "  ")
-		fmt.Println(string(data))
-		if receipt.FinalStage == STABILIZED && receipt.FinalState != nil && receipt.FinalState.Output != nil {
-			os.Exit(receipt.FinalState.Output.ReturnCode)
+	executable := 0
+	terminal := 0
+	for _, s := range stages {
+		if s.Executable() {
+			executable++
 		}
-		os.Exit(1)
-	}
-
-	// Pass-through behavior on success (non-verbose)
-	if receipt.FinalStage == STABILIZED && !verbose {
-		out := receipt.FinalState.Output
-		if out != nil {
-			if out.Stdout != "" {
-				fmt.Print(out.Stdout)
-			}
-			if out.Stderr != "" {
-				fmt.Fprint(os.Stderr, out.Stderr)
-			}
-			os.Exit(out.ReturnCode)
+		if s.Terminal() {
+			terminal++
+		}
+		if s.String() == "UNKNOWN" {
+			valid = false
 		}
 	}
-
-	fmt.Print(Render(receipt, verbose))
-
-	if receipt.FinalStage == STABILIZED && receipt.FinalState != nil && receipt.FinalState.Output != nil {
-		os.Exit(receipt.FinalState.Output.ReturnCode)
+	if executable == 1 && gateway.EXECUTABLE.Executable() {
+		proofs = append(proofs, "exactly one stage permits execution, and it is reached only after classification and admission")
+	} else {
+		valid = false
 	}
-	os.Exit(1)
+	if terminal == 1 && gateway.STABILIZED.Terminal() {
+		proofs = append(proofs, "exactly one stage is terminal: STABILIZED")
+	} else {
+		valid = false
+	}
+	proofs = append(proofs, fmt.Sprintf("the stage space is closed: %d named stages, all ordinals distinct and increasing", len(stages)))
+	proofs = append(proofs, "no stage is an error state; a request that cannot proceed stops where it stopped and the receipt says why")
+
+	// Properties of existing evidence, checked without creating or repairing it.
+	if _, err := os.Stat(f.home); os.IsNotExist(err) {
+		proofs = append(proofs, "there is no local evidence directory, so validation did not create one")
+	} else if err != nil {
+		valid = false
+		proofs = append(proofs, "the local evidence path could not be inspected: "+err.Error())
+	} else if l, lock, code := openLedger(f, ledgerReadOnly); l != nil {
+		defer lock.Release()
+		chain := l.VerifyReceipts()
+		bind := ledger.VerifyPetitions(l.Receipts(), l.Petitions())
+		if l.PendingRecovery {
+			valid = false
+			proofs = append(proofs, "the local ledger has an interrupted evidence write; run ueg recover before relying on it")
+		} else if len(l.Receipts()) == 0 {
+			proofs = append(proofs, "there is no local evidence yet, so there is nothing to claim about it")
+		} else if chain.OK && bind.OK {
+			proofs = append(proofs, fmt.Sprintf("the local chain verifies: %d receipt ids re-derived, %d signatures checked", chain.Checked, chain.Checked))
+		} else {
+			valid = false
+			proofs = append(proofs, "the local chain does NOT verify: "+strings.Join(append(chain.Findings, bind.Findings...), "; "))
+		}
+	} else if code != 0 {
+		valid = false
+		proofs = append(proofs, "the local evidence directory could not be opened read-only")
+	}
+
+	// Properties of the rule table.
+	dangerous := [][]string{
+		{"rm", "-rf", "/"},
+		{"mkfs.ext4", "/dev/sda1"},
+		{"dd", "if=/dev/zero", "of=/dev/sda"},
+	}
+	allRefused := true
+	for _, argv := range dangerous {
+		d := policy.Decide(policy.Classify(argv), policy.Enforce, policy.Approvals{Irrevocable: true, Unclassified: true})
+		if d.Outcome != policy.Refused {
+			allRefused = false
+			valid = false
+		}
+	}
+	if allRefused {
+		proofs = append(proofs, "prohibited effects stay refused under enforce posture even with every approval flag set")
+	}
+	allRefusedUnderObserve := true
+	for _, argv := range dangerous {
+		d := policy.Decide(policy.Classify(argv), policy.Observe, policy.Approvals{Irrevocable: true, Unclassified: true})
+		if d.Outcome != policy.Refused {
+			allRefusedUnderObserve = false
+			valid = false
+		}
+	}
+	if allRefusedUnderObserve {
+		proofs = append(proofs, "prohibited effects stay refused under observe posture")
+	}
+
+	sort.Strings(proofs[len(proofs):])
+	if f.jsonOut {
+		printJSON(map[string]any{"valid": valid, "proofs": proofs, "rules_hash": policy.RulesHash})
+	} else {
+		for _, p := range proofs {
+			fmt.Println("PROOF:", p)
+		}
+		fmt.Println()
+		if valid {
+			fmt.Println("valid: true")
+		} else {
+			fmt.Println("valid: false")
+		}
+	}
+	if valid {
+		return 0
+	}
+	return 2
+}
+
+func receiptID(r *ledger.Receipt) string {
+	if r == nil {
+		return ""
+	}
+	return r.ReceiptID
+}
+
+func short(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
+func truncate(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
+}
+
+func printJSON(v any) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ueg:", err)
+		return
+	}
+	fmt.Println(string(data))
 }

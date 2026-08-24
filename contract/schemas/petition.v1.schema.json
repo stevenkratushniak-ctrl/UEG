@@ -1,0 +1,90 @@
+{
+  "$id": "https://realitylayer.dev/schemas/petition.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "actor": {
+      "minLength": 3,
+      "type": "string"
+    },
+    "context": {
+      "additionalProperties": true,
+      "description": "Structured, minimized context. MUST NOT contain secrets in cleartext.",
+      "type": "object"
+    },
+    "inputs_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "observe",
+        "enforce"
+      ],
+      "type": "string"
+    },
+    "petition_id": {
+      "minLength": 16,
+      "type": "string"
+    },
+    "policy_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "surface": {
+      "enum": [
+        "k8s_mutation",
+        "artifact_promotion",
+        "artifact_deploy",
+        "registry_admission",
+        "egress",
+        "spawn",
+        "mutation"
+      ],
+      "type": "string"
+    },
+    "target": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "time": {
+      "additionalProperties": false,
+      "properties": {
+        "time_source": {
+          "enum": [
+            "adapter_observed",
+            "kernel_observed",
+            "monotonic_counter"
+          ],
+          "type": "string"
+        },
+        "timestamp_iso8601": {
+          "minLength": 10,
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp_iso8601",
+        "time_source"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "petition_id",
+    "actor",
+    "surface",
+    "action",
+    "target",
+    "inputs_hash",
+    "policy_hash",
+    "mode",
+    "time"
+  ],
+  "title": "Petition v1",
+  "type": "object"
+}

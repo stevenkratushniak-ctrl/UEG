@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="UEG is a local command decision and evidence layer. Public unsigned Linux amd64 engineering preview.">
+  <title>UEG — Universal Execution Gateway</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="wordmark" href="#top" aria-label="UEG home">U<span>E</span>G</a>
+    <nav aria-label="Primary navigation">
+      <a href="#product">Product</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#downloads">Downloads</a>
+      <a href="#limits">Limits</a>
+      <a href="https://github.com/stevenkratushniak-ctrl/UEG">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">PUBLIC UNSIGNED ENGINEERING PREVIEW · LINUX AMD64</p>
+        <h1>Decide before a command starts.<br><span>Keep evidence of what happened.</span></h1>
+        <p class="lede">UEG is a local command decision and evidence layer for operators, CI systems, and AI agents. It applies a conservative policy gate, runs only an admitted command, and records signed, offline-verifiable evidence of the request and observed result.</p>
+        <div class="actions">
+          <a class="primary" href="https://github.com/stevenkratushniak-ctrl/UEG/releases/download/v2.2.0-v3-candidate.1/ueg-2.2.0-v3-candidate.1-linux-amd64.tar.gz">Download Linux amd64 preview</a>
+          <a class="secondary" href="https://github.com/stevenkratushniak-ctrl/UEG">View source on GitHub</a>
+        </div>
+        <p class="signature-warning">Unsigned preview. Verify SHA-256 before extraction. No Windows runtime claim.</p>
+      </div>
+      <aside class="status-card" aria-label="Release status">
+        <p>UEG 2.2.0-v3-candidate.1</p>
+        <dl>
+          <dt>State</dt><dd>Public engineering preview</dd>
+          <dt>Qualified artifact</dt><dd>Linux amd64 candidate</dd>
+          <dt>Manifest</dt><dd>Unsigned</dd>
+          <dt>General release</dt><dd>No</dd>
+        </dl>
+      </aside>
+    </section>
+
+    <section id="product" class="section">
+      <p class="eyebrow">WHAT UEG DOES</p>
+      <h2>A command gateway with bounded evidence—not a sandbox.</h2>
+      <div class="grid four">
+        <article><b>01</b><h3>Request</h3><p>Receive the exact command, arguments, working context, and operator posture.</p></article>
+        <article><b>02</b><h3>Decide</h3><p>Apply conservative effect rules before an admitted child process starts.</p></article>
+        <article><b>03</b><h3>Record</h3><p>Capture exit status, complete output hashes and counts, bounded excerpts, and signed receipts.</p></article>
+        <article><b>04</b><h3>Verify</h3><p>Export evidence another party can check with independent identity and lifecycle inputs.</p></article>
+      </div>
+    </section>
+
+    <section id="evidence" class="section split">
+      <div>
+        <p class="eyebrow">EVIDENCE BOUNDARY</p>
+        <h2>The exact packaged Linux candidate passed engineering qualification.</h2>
+        <p>The supplied record covers native Ubuntu 24.04.3 x86_64 execution, deterministic rebuilds, Go and Python verifier parity, tamper rejection, policy refusal, bounded output capture, and lifecycle workflows. Fast Launch performed a fresh stable-home run, replay, export, pinned verification, Python verification, and tamper test on 2026-08-24.</p>
+      </div>
+      <div class="receipt">
+        <code>PLATFORM ARCHIVE SHA-256</code>
+        <strong>0fe3378528a559c832d2c6201369e9ae669cb842e3ee0be12d8e344734959d35</strong>
+        <code>SOURCE ARCHIVE SHA-256</code>
+        <strong>9c7e4fb79fe50b3d215e4425758c32acb8d944349c84c8c99184e2aac2de8299</strong>
+        <code>CANDIDATE PACKAGE SHA-256</code>
+        <strong>217f905a64a49c04e836f62dc7031917391bc14bb5fde6c07f99a8bd4435ae8f</strong>
+      </div>
+    </section>
+
+    <section id="downloads" class="section">
+      <p class="eyebrow">EXACT PUBLIC ASSETS</p>
+      <h2>Download only what the evidence supports.</h2>
+      <div class="downloads">
+        <article>
+          <p class="badge">LINUX AMD64</p>
+          <h3>Platform archive</h3>
+          <p>The engineering-qualified command-line candidate, documentation, demo, SBOM, and notices.</p>
+          <a href="https://github.com/stevenkratushniak-ctrl/UEG/releases/download/v2.2.0-v3-candidate.1/ueg-2.2.0-v3-candidate.1-linux-amd64.tar.gz">Download .tar.gz</a>
+        </article>
+        <article>
+          <p class="badge">SOURCE</p>
+          <h3>Exact source snapshot</h3>
+          <p>The source archive named by the candidate build provenance.</p>
+          <a href="https://github.com/stevenkratushniak-ctrl/UEG/releases/download/v2.2.0-v3-candidate.1/ueg-2.2.0-v3-candidate.1-source.tar.gz">Download source</a>
+        </article>
+        <article>
+          <p class="badge">INDEPENDENT CHECK</p>
+          <h3>Python verifier</h3>
+          <p>A separately packaged implementation for checking exported evidence.</p>
+          <a href="https://github.com/stevenkratushniak-ctrl/UEG/releases/download/v2.2.0-v3-candidate.1/ueg-python-verifier.zip">Download verifier</a>
+        </article>
+      </div>
+      <p class="checksum-link"><a href="https://github.com/stevenkratushniak-ctrl/UEG/releases/download/v2.2.0-v3-candidate.1/SHA256SUMS">Download SHA256SUMS</a> · <a href="https://github.com/stevenkratushniak-ctrl/UEG/releases/tag/v2.2.0-v3-candidate.1">Read prerelease notes and evidence assets</a></p>
+    </section>
+
+    <section id="limits" class="section limits">
+      <p class="eyebrow">LIMITS STAY CLOSE TO THE CLAIM</p>
+      <h2>Evidence is useful only when its boundary remains visible.</h2>
+      <ul>
+        <li>UEG is not process containment or an operating-system sandbox.</li>
+        <li>It does not prove the host, operator, environment, or clock was honest.</li>
+        <li>It does not observe every syscall, network action, filesystem effect, or side effect.</li>
+        <li>A B+ identity proves pseudonymous ledger continuity, not real-world identity.</li>
+        <li>Offline verification cannot prove that no newer lifecycle event exists.</li>
+        <li>Windows is compile-checked only; no Windows runtime or download is published.</li>
+        <li>Linux arm64, macOS, and WSL are not qualified distribution targets.</li>
+        <li>The preview is unsigned and has not received an independent security review.</li>
+      </ul>
+    </section>
+
+    <section class="section support">
+      <div><p class="eyebrow">SUPPORT</p><h2>Use the public issue tracker.</h2><p>Report ordinary product questions and reproducible, non-sensitive defects through GitHub Issues. No response-time or service-level promise is made.</p><a href="https://github.com/stevenkratushniak-ctrl/UEG/issues">Open an issue</a></div>
+      <div><p class="eyebrow">SECURITY</p><h2>Report privately.</h2><p>Use GitHub private vulnerability reporting. Never place credentials, private keys, sensitive evidence, or an undisclosed vulnerability in a public issue.</p><a href="https://github.com/stevenkratushniak-ctrl/UEG/security/advisories/new">Report a vulnerability privately</a></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>UEG 2.2.0-v3-candidate.1 · Public unsigned Linux amd64 engineering preview</p>
+    <p>Published through Fast Launch 1.0. No custom domain is configured.</p>
+  </footer>
+</body>
+</html>

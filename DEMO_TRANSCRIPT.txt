@@ -1,0 +1,110 @@
+UEG 2.1.0-bplus - disposable Windows demo transcript
+
+This transcript is normalized from an actual run of demo/demo.ps1 against the
+compiled B+ candidate. Machine-specific temporary paths, identity digests, key
+fingerprints, receipt ids, and the local account name are represented by angle-
+bracketed labels. The demo removed its temporary evidence identity and recovery
+package after completion.
+
+1. Help is inert. Identity creation is explicit.
+
+> ueg --help
+ueg - Universal Execution Gateway
+...
+  ueg identity <command> [flags]             Initialize and manage a B+ evidence identity
+  ueg run [flags] -- <command> [args...]     Classify, admit or refuse, execute, record
+  ueg verify [trust flags] <bundle.tar.gz>   Verify legacy or B+ evidence without mutation
+...
+  exit 0
+
+> ueg identity init --home <evidence-home> --recovery-package <offline-recovery.json> --label "Disposable demo ledger" --passphrase-stdin
+INITIALIZED evidence identity <identity-id>
+  lifecycle  0 <lifecycle-digest>
+  epoch      0 ACTIVE <operational-key-id>
+  recovery   <offline-recovery.json> (store offline; UEG created no hidden copy)
+  exit 0
+
+2. A harmless command runs and leaves signed evidence.
+
+> ueg run --home <evidence-home> -- whoami.exe
+<local-account>
+ueg: REVERSIBLE STABILIZED exit=0 receipts=<petition>,<outcome> freshness=LOCAL_ONLY_UNPROVEN
+  exit 0
+
+> ueg ledger --home <evidence-home>
+receipts  2
+chain     OK (2 receipts re-derived and verified)
+  exit 0
+
+3. A missing executable with a prohibited basename is refused before launch.
+
+> ueg run --home <evidence-home> -- <missing-path>\format.exe synthetic-target
+ueg: REFUSED  <missing-path>\format.exe synthetic-target
+     effect  PROHIBITED (fs.wipe.filesystem)
+     because prohibited effect: destroys a filesystem or partition table; no compensating action exists
+     state   unchanged; the command did not start
+  exit 77
+
+4. Replay verifies, re-runs, records, and compares the prior command.
+
+> ueg replay --home <evidence-home>
+REPLAY: MATCH
+  target  whoami.exe
+  reason  signatures verified, and the command reproduced the recorded exit code and output bytes
+  exit 0
+
+5. Public trust artifacts and evidence export to new files.
+
+> ueg identity card --home <evidence-home> --output <public>\identity-card.json
+Wrote card for <identity-id> to <public>\identity-card.json. Retain it independently.
+  exit 0
+
+> ueg identity anchor --home <evidence-home> --output <public>\evidence-anchor.json
+Wrote anchor for <identity-id> to <public>\evidence-anchor.json. Retain it independently.
+  exit 0
+
+> ueg identity checkpoint export --home <evidence-home> --output <public>\checkpoint.json
+Wrote checkpoint export for <identity-id> to <public>\checkpoint.json. Retain it independently.
+  exit 0
+
+> ueg export --home <evidence-home> <public>\evidence.tar.gz
+wrote <public>\evidence.tar.gz (4 receipts, signed by <operational-key-id>)
+  exit 0
+
+6. A B+ bundle is not fully trusted without an independent identity pin.
+
+> ueg verify <public>\evidence.tar.gz
+TRUST_INDETERMINATE: the bundle is internally authentic, but B+ identity continuity requires an independently supplied genesis identity pin
+  signatures   PASS
+  ledger       PASS
+  identity     INDETERMINATE
+  lifecycle    PASS
+  key status   AUTHENTIC_EMBEDDED_STATUS_ONLY
+  checkpoint   PASS / EMBEDDED_ONLY / freshness UNPROVEN_OFFLINE
+  time         HOST_METADATA_ONLY
+  exit 2
+
+7. An independently retained identity pin and checkpoint produce a bounded
+   verified verdict. This does not claim online freshness or trusted time.
+
+> ueg verify --expected-identity-id <identity-id> --checkpoint <public>\checkpoint.json <public>\evidence.tar.gz
+VERIFIED: B+ evidence verified at the independently supplied lifecycle checkpoint; current-status freshness was not claimed
+  signatures   PASS
+  ledger       PASS
+  identity     PASS
+  lifecycle    PASS
+  key status   AUTHORIZED_ACTIVE
+  checkpoint   PASS / SUPPLIED_FILE / freshness UNPROVEN_OFFLINE
+  time         HOST_METADATA_ONLY
+  exit 0
+
+8. A changed bundle copy is rejected.
+
+> ueg verify <public>\tampered.tar.gz
+INVALID: invalid tar: archive/tar: invalid tar header
+  exit 2
+
+The exact unnormalized transcript, command result, and SHA-256 manifest are
+retained in the private B+ qualification evidence package. This public
+transcript is explanatory product documentation, not a substitute for that
+qualification evidence.

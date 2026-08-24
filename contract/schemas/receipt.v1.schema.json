@@ -1,0 +1,132 @@
+{
+  "$id": "https://realitylayer.dev/schemas/receipt.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor": {
+      "minLength": 3,
+      "type": "string"
+    },
+    "adapter_degraded": {
+      "type": "boolean"
+    },
+    "admission_outcome": {
+      "enum": [
+        "ADMITTED",
+        "REFUSED"
+      ],
+      "type": "string"
+    },
+    "clause_ids": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 0,
+      "type": "array"
+    },
+    "engine_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "evaluation_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "expression_outcome": {
+      "enum": [
+        "EXPRESSED",
+        "SILENT"
+      ],
+      "type": "string"
+    },
+    "passport_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "petition_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "petition_summary": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "surface": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "surface",
+        "action",
+        "target"
+      ],
+      "type": "object"
+    },
+    "policy_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "prev_receipt_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receipt_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "sequence_no": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "signature_b64": {
+      "minLength": 16,
+      "type": "string"
+    },
+    "signing_key_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "time_source": {
+      "enum": [
+        "adapter_observed",
+        "kernel_observed",
+        "monotonic_counter"
+      ],
+      "type": "string"
+    },
+    "timestamp_iso8601": {
+      "minLength": 10,
+      "type": "string"
+    }
+  },
+  "required": [
+    "receipt_id",
+    "prev_receipt_id",
+    "sequence_no",
+    "timestamp_iso8601",
+    "time_source",
+    "actor",
+    "petition_hash",
+    "petition_summary",
+    "admission_outcome",
+    "expression_outcome",
+    "policy_hash",
+    "engine_version",
+    "clause_ids",
+    "evaluation_hash",
+    "signing_key_id",
+    "signature_b64"
+  ],
+  "title": "Receipt v1",
+  "type": "object"
+}

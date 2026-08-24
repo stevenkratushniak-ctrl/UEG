@@ -1,0 +1,71 @@
+{
+  "$id": "https://realitylayer.dev/schemas/seal.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "first_receipt_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "last_receipt_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "merkle_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "policy_hash_set": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "seal_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "signature_b64": {
+      "type": "string"
+    },
+    "signing_key_id": {
+      "type": "string"
+    },
+    "window": {
+      "additionalProperties": false,
+      "properties": {
+        "end_iso8601": {
+          "type": "string"
+        },
+        "start_iso8601": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "time"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "start_iso8601",
+        "end_iso8601"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "seal_id",
+    "window",
+    "first_receipt_id",
+    "last_receipt_id",
+    "merkle_root",
+    "policy_hash_set",
+    "signing_key_id",
+    "signature_b64"
+  ],
+  "title": "Seal v1",
+  "type": "object"
+}
