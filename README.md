@@ -5,24 +5,26 @@ offline-verifiable evidence of what was requested, admitted, executed, and
 returned. It is built for operators, CI systems, and AI agents that need both
 a pre-execution decision and a durable receipt chain. UEG is not a sandbox.
 
-## Public preview status
+## Public release status
 
-`2.2.0-v3-candidate.1` is publicly available as an **unsigned Linux amd64
-engineering preview**. It is not a signed or generally qualified release.
+`2.2.0-v3-candidate.2` is publicly available as an **unsigned Windows x64 and
+Linux amd64 engineering release**. Both exact platform archives passed the same
+50-check native packaged-artifact workflow. It is not a signed general release.
 
 - [Product page](https://stevenkratushniak-ctrl.github.io/UEG/)
-- [GitHub prerelease and exact downloads](https://github.com/stevenkratushniak-ctrl/UEG/releases/tag/v2.2.0-v3-candidate.1)
+- [GitHub prerelease and exact downloads](https://github.com/stevenkratushniak-ctrl/UEG/releases/tag/v2.2.0-v3-candidate.2)
 - [Release checksums](RELEASE_CHECKSUMS.txt)
 - [Complete public-status boundary](PUBLIC_ENGINEERING_PREVIEW.md)
 - [Support through GitHub Issues](https://github.com/stevenkratushniak-ctrl/UEG/issues)
 - [Private vulnerability reporting](https://github.com/stevenkratushniak-ctrl/UEG/security/advisories/new)
 
-The qualified download is the exact Linux amd64 archive with SHA-256
-`0fe3378528a559c832d2c6201369e9ae669cb842e3ee0be12d8e344734959d35`.
-Windows has compile-only evidence; there is no Windows runtime download or
-support claim. Linux arm64, macOS, and WSL are not qualified distribution
-targets. The manifest is unsigned, and no independent-review or customer-result
-claim is made.
+The qualified Windows x64 archive SHA-256 is
+`42daf24cabbef22c074516ca246d237866a2499340a19737ce854f37128bb179`.
+The qualified Linux amd64 archive SHA-256 is
+`d5bb3b251d1dc7035298a45e86cc869caf001114e5c4562c248709beea94c0c3`.
+Linux arm64, macOS, ARM, and WSL are not qualified distribution targets. The
+manifest is unsigned, and no independent-review or customer-result claim is
+made.
 
 Start a disposable first demo by creating an evidence identity, then running a
 harmless command:
@@ -50,11 +52,10 @@ independent Python verifier only when `UEG_PYTHON_VERIFIER_ROOT` names an
 extracted `ueg-python-verifier.zip`; that verifier and its locked dependencies
 are distributed separately.
 
-The demo uses the operating system's temporary directory and is not a WSL
-qualification. On the Fast Launch test host, WSL temporary-directory cleanup
-interrupted the packaged demo; the exact binary subsequently passed the full
-run, replay, export, pinned Go verification, independent Python verification,
-refusal, and tamper flow from a persistent Ubuntu home directory.
+The demo uses the operating system's temporary directory. The retained Linux
+qualification uses a persistent native Linux temp root because this host's WSL
+systemd-user startup can remove ordinary `/tmp` state. WSL hosted that native
+amd64 run but is not itself a qualified distribution target.
 
 ## What UEG does
 
@@ -215,7 +216,7 @@ Build locally with Go 1.22 or newer:
 ```text
 make build
 make test
-make dist VERSION=2.2.0-v3-candidate.1
+make dist VERSION=2.2.0-v3-candidate.2
 make verify-release DIST=dist
 ```
 
