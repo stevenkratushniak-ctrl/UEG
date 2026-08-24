@@ -1,0 +1,58 @@
+name: release-qualification
+
+# Prepared locally for the owner to enable after repository and hosted-service
+# review. It does not run automatically on push or pull requests.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -r requirements.lock
+      - name: Formatting check
+        shell: bash
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            printf 'Files require gofmt:\n%s\n' "$files"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test ./...
+      - run: python -m pytest tests -q
+      - run: python -m unittest discover -s tests -v
+      - name: Race instrumentation
+        if: runner.os != 'Windows'
+        run: go test -race ./...
+
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: python -m pip install pip-audit
+      - run: govulncheck ./...
+      - run: python -m pip_audit -r requirements.lock

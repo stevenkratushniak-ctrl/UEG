@@ -1,0 +1,244 @@
+{
+  "version": "2",
+  "classes": [
+    "REVERSIBLE",
+    "COMPENSABLE",
+    "IRREVOCABLE",
+    "PROHIBITED",
+    "UNCLASSIFIED"
+  ],
+  "unmatched_class": "UNCLASSIFIED",
+  "rules": [
+    {
+      "id": "fs.wipe.filesystem",
+      "class": "PROHIBITED",
+      "surface": "fs.mutate",
+      "cmd": ["mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkfs.vfat", "wipefs", "fdisk", "sfdisk", "parted", "shred", "diskpart", "format"],
+      "note": "destroys a filesystem or partition table; no compensating action exists"
+    },
+    {
+      "id": "fs.remove.root",
+      "class": "PROHIBITED",
+      "surface": "fs.mutate",
+      "cmd": ["rm", "rmdir", "del", "rd"],
+      "operand_is_root": true,
+      "note": "recursive removal targeting a filesystem or home root"
+    },
+    {
+      "id": "block.device.write",
+      "class": "PROHIBITED",
+      "surface": "fs.mutate",
+      "cmd": ["dd"],
+      "args_regex": "(^|\\s)of=/dev/",
+      "note": "raw write to a block device"
+    },
+    {
+      "id": "perm.recursive.root",
+      "class": "PROHIBITED",
+      "surface": "fs.mutate",
+      "cmd": ["chmod", "chown", "chgrp"],
+      "flags_any": ["-R", "--recursive"],
+      "operand_is_root": true,
+      "note": "recursive ownership or mode change over a filesystem root"
+    },
+    {
+      "id": "shell.pipe.to.interpreter",
+      "class": "PROHIBITED",
+      "surface": "process.spawn",
+      "args_regex": "(curl|wget)[^|]*\\|\\s*(sudo\\s+)?(ba)?sh",
+      "note": "executes code fetched from the network without inspection"
+    },
+    {
+      "id": "process.fork.bomb",
+      "class": "PROHIBITED",
+      "surface": "process.spawn",
+      "args_regex": ":\\(\\)\\s*\\{\\s*:\\|\\s*:&\\s*\\}\\s*;\\s*:",
+      "note": "fork bomb"
+    },
+    {
+      "id": "shell.opaque.string",
+      "class": "UNCLASSIFIED",
+      "surface": "process.spawn",
+      "cmd": ["sh", "bash", "zsh", "dash", "ksh", "fish", "powershell", "pwsh", "cmd"],
+      "flags_any": ["-c", "-Command", "/c"],
+      "note": "the effect lives inside a shell string UEG does not parse; classify the inner command instead"
+    },
+    {
+      "id": "fs.remove",
+      "class": "IRREVOCABLE",
+      "surface": "fs.mutate",
+      "cmd": ["rm", "rmdir", "unlink", "del", "erase"],
+      "note": "deletion is not undone by deleting again; restoring requires a backup that UEG cannot see"
+    },
+    {
+      "id": "fs.overwrite.in.place",
+      "class": "IRREVOCABLE",
+      "surface": "fs.mutate",
+      "cmd": ["sed", "truncate", "dd", "shred"],
+      "flags_any": ["-i", "--in-place", "-s", "--size"],
+      "note": "overwrites file contents in place; the prior contents are gone"
+    },
+    {
+      "id": "vcs.history.rewrite",
+      "class": "IRREVOCABLE",
+      "surface": "net.egress",
+      "cmd": ["git"],
+      "subcmd": ["push"],
+      "flags_any": ["-f", "--force"],
+      "note": "force push can destroy commits on the remote"
+    },
+    {
+      "id": "vcs.local.reset",
+      "class": "IRREVOCABLE",
+      "surface": "fs.mutate",
+      "cmd": ["git"],
+      "subcmd": ["reset", "clean"],
+      "flags_any": ["--hard", "-f", "--force", "-fd", "-fdx"],
+      "note": "discards uncommitted work with no recovery path"
+    },
+    {
+      "id": "pkg.install",
+      "class": "IRREVOCABLE",
+      "surface": "pkg.mutate",
+      "cmd": ["apt", "apt-get", "yum", "dnf", "apk", "pacman", "brew", "choco", "winget", "snap"],
+      "note": "package operations run maintainer scripts; uninstall does not restore the prior system state"
+    },
+    {
+      "id": "pkg.language.install",
+      "class": "IRREVOCABLE",
+      "surface": "pkg.mutate",
+      "cmd": ["pip", "pip3", "npm", "yarn", "pnpm", "gem", "cargo", "go"],
+      "subcmd": ["install", "add", "i", "get", "publish"],
+      "note": "installs or publishes packages, executing third-party install hooks"
+    },
+    {
+      "id": "system.power",
+      "class": "IRREVOCABLE",
+      "surface": "system.control",
+      "cmd": ["shutdown", "reboot", "halt", "poweroff", "systemctl", "service", "launchctl"],
+      "note": "changes the running state of the machine or its services"
+    },
+    {
+      "id": "container.prune",
+      "class": "IRREVOCABLE",
+      "surface": "system.control",
+      "cmd": ["docker", "podman", "kubectl", "helm"],
+      "subcmd": ["prune", "rm", "rmi", "delete", "destroy", "uninstall"],
+      "note": "removes containers, images, or cluster objects"
+    },
+    {
+      "id": "infra.apply",
+      "class": "IRREVOCABLE",
+      "surface": "net.egress",
+      "cmd": ["terraform", "pulumi", "aws", "gcloud", "az", "kubectl"],
+      "subcmd": ["apply", "destroy", "up", "create", "delete", "put", "deploy"],
+      "note": "mutates infrastructure outside this machine"
+    },
+    {
+      "id": "process.kill",
+      "class": "IRREVOCABLE",
+      "surface": "system.control",
+      "cmd": ["kill", "killall", "pkill", "taskkill"],
+      "note": "terminates a running process; its in-flight work is lost"
+    },
+    {
+      "id": "fs.overwrite.capable",
+      "class": "IRREVOCABLE",
+      "surface": "fs.mutate",
+      "cmd": ["cp", "mv", "install", "ln", "touch", "tee", "rsync", "tar", "unzip", "zip"],
+      "note": "may replace prior data that UEG cannot restore"
+    },
+    {
+      "id": "fs.create.directory",
+      "class": "COMPENSABLE",
+      "surface": "fs.mutate",
+      "cmd": ["mkdir"],
+      "note": "creates directories that can be removed if still empty"
+    },
+    {
+      "id": "vcs.push",
+      "class": "COMPENSABLE",
+      "surface": "net.egress",
+      "cmd": ["git"],
+      "subcmd": ["push"],
+      "note": "published commits can be reverted but not unpublished"
+    },
+    {
+      "id": "vcs.local.write",
+      "class": "COMPENSABLE",
+      "surface": "fs.mutate",
+      "cmd": ["git"],
+      "subcmd": ["commit", "add", "stash", "tag", "revert"],
+      "note": "changes the local repository state; recoverable through the reflog"
+    },
+    {
+      "id": "vcs.local.overwrite",
+      "class": "IRREVOCABLE",
+      "surface": "fs.mutate",
+      "cmd": ["git"],
+      "subcmd": ["checkout", "switch", "merge", "rebase", "restore", "apply", "cherry-pick"],
+      "note": "may overwrite uncommitted work that UEG cannot restore"
+    },
+    {
+      "id": "net.egress",
+      "class": "COMPENSABLE",
+      "surface": "net.egress",
+      "cmd": ["curl", "wget", "ssh", "scp", "sftp", "nc", "ncat", "telnet", "ftp", "mail", "sendmail", "mailx", "http", "httpie"],
+      "note": "a request that has left the machine cannot be recalled, even if nothing local changed"
+    },
+    {
+      "id": "read.only.inspect",
+      "class": "REVERSIBLE",
+      "surface": "fs.read",
+      "cmd": ["echo", "printf", "cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg", "ag", "fd", "ls", "dir", "stat", "file", "which", "type", "whereis", "pwd", "uname", "hostname", "whoami", "id", "uptime", "df", "du", "free", "ps", "printenv", "cut", "tr", "diff", "cmp", "sha256sum", "sha1sum", "md5sum", "basename", "dirname", "realpath", "readlink", "tree", "column", "nl", "seq", "true", "false", "sleep"],
+      "note": "observes state without changing it"
+    },
+    {
+      "id": "read.only.git",
+      "class": "REVERSIBLE",
+      "surface": "fs.read",
+      "cmd": ["git"],
+      "subcmd": ["status", "log", "diff", "show", "ls-files", "version", "help"],
+      "note": "read-only git subcommand"
+    },
+    {
+      "id": "read.only.docker",
+      "class": "REVERSIBLE",
+      "surface": "fs.read",
+      "cmd": ["docker"],
+      "subcmd": ["version", "info", "images", "ps", "inspect"],
+      "note": "read-only docker subcommand"
+    },
+    {
+      "id": "read.only.kubectl",
+      "class": "REVERSIBLE",
+      "surface": "fs.read",
+      "cmd": ["kubectl"],
+      "subcmd": ["version", "get", "describe"],
+      "note": "read-only kubectl subcommand"
+    },
+    {
+      "id": "read.only.python.package",
+      "class": "REVERSIBLE",
+      "surface": "fs.read",
+      "cmd": ["pip", "pip3"],
+      "subcmd": ["list", "show", "version", "help"],
+      "note": "read-only Python package subcommand"
+    },
+    {
+      "id": "read.only.go",
+      "class": "REVERSIBLE",
+      "surface": "fs.read",
+      "cmd": ["go"],
+      "subcmd": ["version", "help"],
+      "note": "read-only Go toolchain subcommand"
+    },
+    {
+      "id": "toolchain.invoke",
+      "class": "UNCLASSIFIED",
+      "surface": "process.spawn",
+      "cmd": ["python", "python3", "node", "ruby", "perl", "php", "java", "dotnet", "make", "pytest", "go"],
+      "note": "runs arbitrary program code whose effects UEG cannot determine from the command line"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+build/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.xml
+*.tar.gz
+# never commit signing material or a local ledger
+*.pem
+/keys/
+receipts.ndjson
+petitions.ndjson

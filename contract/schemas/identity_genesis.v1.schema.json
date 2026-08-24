@@ -1,0 +1,107 @@
+{
+  "$id": "https://realitylayer.dev/schemas/identity_genesis.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "advisory_label": {
+      "maxLength": 200,
+      "type": "string"
+    },
+    "canonicalization": {
+      "const": "RFC8785-JCS",
+      "type": "string"
+    },
+    "epoch_zero_key_id": {
+      "$ref": "#/$defs/key_id"
+    },
+    "epoch_zero_proof_b64": {
+      "$ref": "#/$defs/signature"
+    },
+    "epoch_zero_public_key_pem": {
+      "$ref": "#/$defs/public_key"
+    },
+    "genesis_policy": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrent_signing": {
+          "const": false,
+          "type": "boolean"
+        },
+        "one_active_operational_key": {
+          "const": true,
+          "type": "boolean"
+        },
+        "recovery_root_rotation": {
+          "const": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "one_active_operational_key",
+        "concurrent_signing",
+        "recovery_root_rotation"
+      ],
+      "type": "object"
+    },
+    "identity_id": {
+      "$ref": "#/$defs/identity_id"
+    },
+    "identity_nonce_b64": {
+      "pattern": "^[A-Za-z0-9+/]{43}=$",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "ueg-bplus/1",
+      "type": "string"
+    },
+    "recovery_root_key_id": {
+      "$ref": "#/$defs/key_id"
+    },
+    "recovery_root_public_key_pem": {
+      "$ref": "#/$defs/public_key"
+    },
+    "recovery_signature_b64": {
+      "$ref": "#/$defs/signature"
+    },
+    "schema": {
+      "const": "ueg.identity-genesis.v1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "protocol_version",
+    "identity_nonce_b64",
+    "recovery_root_key_id",
+    "recovery_root_public_key_pem",
+    "epoch_zero_key_id",
+    "epoch_zero_public_key_pem",
+    "canonicalization",
+    "genesis_policy",
+    "advisory_label",
+    "identity_id",
+    "recovery_signature_b64",
+    "epoch_zero_proof_b64"
+  ],
+  "title": "UEG B+ Identity Genesis v1",
+  "type": "object",
+  "$defs": {
+    "identity_id": {
+      "pattern": "^ueg:identity:sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "key_id": {
+      "pattern": "^ueg:sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "public_key": {
+      "minLength": 100,
+      "pattern": "^-----BEGIN PUBLIC KEY-----",
+      "type": "string"
+    },
+    "signature": {
+      "pattern": "^[A-Za-z0-9+/]{86}==$",
+      "type": "string"
+    }
+  }
+}

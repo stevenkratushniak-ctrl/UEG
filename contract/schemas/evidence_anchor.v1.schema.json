@@ -1,0 +1,29 @@
+{
+  "$id": "https://realitylayer.dev/schemas/evidence_anchor.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "anchor_digest": {"$ref": "#/$defs/digest"},
+    "epoch_number": {"minimum": 0, "type": "integer"},
+    "identity_id": {"pattern": "^ueg:identity:sha256:[0-9a-f]{64}$", "type": "string"},
+    "ledger_boundary": {"$ref": "#/$defs/boundary"},
+    "lifecycle_record_digest": {"$ref": "#/$defs/digest"},
+    "lifecycle_sequence": {"minimum": 0, "type": "integer"},
+    "operational_key_id": {"pattern": "^ueg:sha256:[0-9a-f]{64}$", "type": "string"},
+    "protocol_version": {"const": "ueg-bplus/1", "type": "string"},
+    "schema": {"const": "ueg.evidence-anchor.v1", "type": "string"},
+    "signature_b64": {"pattern": "^[A-Za-z0-9+/]{86}==$", "type": "string"}
+  },
+  "required": ["schema", "protocol_version", "identity_id", "epoch_number", "operational_key_id", "ledger_boundary", "lifecycle_sequence", "lifecycle_record_digest", "anchor_digest", "signature_b64"],
+  "title": "UEG B+ Evidence Anchor v1",
+  "type": "object",
+  "$defs": {
+    "boundary": {
+      "oneOf": [
+        {"additionalProperties": false, "properties": {"receipt_id": {"type": "null"}, "sequence_no": {"const": -1}}, "required": ["sequence_no", "receipt_id"], "type": "object"},
+        {"additionalProperties": false, "properties": {"receipt_id": {"$ref": "#/$defs/digest"}, "sequence_no": {"minimum": 0, "type": "integer"}}, "required": ["sequence_no", "receipt_id"], "type": "object"}
+      ]
+    },
+    "digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+  }
+}

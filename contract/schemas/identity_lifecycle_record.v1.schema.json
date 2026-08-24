@@ -1,0 +1,120 @@
+{
+  "$id": "https://realitylayer.dev/schemas/identity_lifecycle_record.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": ["GENESIS", "MIGRATION", "ROTATE", "RECOVER", "SUSPEND", "RESUME", "REVOKE"],
+      "type": "string"
+    },
+    "epoch_number": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "evidence_anchor_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "identity_id": {
+      "pattern": "^ueg:identity:sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ledger_boundary": {
+      "$ref": "#/$defs/boundary"
+    },
+    "lifecycle_sequence": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "operational_key_id": {
+      "$ref": "#/$defs/key_id"
+    },
+    "operational_proof_b64": {
+      "$ref": "#/$defs/nullable_signature"
+    },
+    "operational_public_key_pem": {
+      "minLength": 100,
+      "pattern": "^-----BEGIN PUBLIC KEY-----",
+      "type": "string"
+    },
+    "operational_status": {
+      "enum": ["ACTIVE", "RETIRED", "SUSPENDED", "REVOKED"],
+      "type": "string"
+    },
+    "previous_epoch": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "additionalProperties": false,
+          "properties": {
+            "epoch_number": {"minimum": 0, "type": "integer"},
+            "final_ledger_boundary": {"$ref": "#/$defs/boundary"},
+            "operational_key_id": {"$ref": "#/$defs/key_id"},
+            "operational_status": {"enum": ["RETIRED", "REVOKED"], "type": "string"}
+          },
+          "required": ["epoch_number", "operational_key_id", "operational_status", "final_ledger_boundary"],
+          "type": "object"
+        }
+      ]
+    },
+    "previous_record_digest": {
+      "$ref": "#/$defs/nullable_digest"
+    },
+    "protocol_version": {
+      "const": "ueg-bplus/1",
+      "type": "string"
+    },
+    "reason_code": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "record_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "recovery_signature_b64": {
+      "$ref": "#/$defs/signature"
+    },
+    "retiring_signature_b64": {
+      "$ref": "#/$defs/nullable_signature"
+    },
+    "schema": {
+      "const": "ueg.identity-lifecycle-record.v1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema", "protocol_version", "identity_id", "lifecycle_sequence",
+    "previous_record_digest", "action", "epoch_number", "operational_key_id",
+    "operational_public_key_pem", "operational_status", "ledger_boundary",
+    "previous_epoch", "evidence_anchor_digest", "reason_code", "record_digest",
+    "recovery_signature_b64", "retiring_signature_b64", "operational_proof_b64"
+  ],
+  "title": "UEG B+ Identity Lifecycle Record v1",
+  "type": "object",
+  "$defs": {
+    "boundary": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {"receipt_id": {"type": "null"}, "sequence_no": {"const": -1}},
+          "required": ["sequence_no", "receipt_id"],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "receipt_id": {"$ref": "#/$defs/digest"},
+            "sequence_no": {"minimum": 0, "type": "integer"}
+          },
+          "required": ["sequence_no", "receipt_id"],
+          "type": "object"
+        }
+      ]
+    },
+    "digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "key_id": {"pattern": "^ueg:sha256:[0-9a-f]{64}$", "type": "string"},
+    "nullable_digest": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+    "nullable_signature": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/signature"}]},
+    "signature": {"pattern": "^[A-Za-z0-9+/]{86}==$", "type": "string"}
+  }
+}

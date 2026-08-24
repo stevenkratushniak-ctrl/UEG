@@ -1,0 +1,15 @@
+{
+  "$id": "https://realitylayer.dev/schemas/identity_card.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "advisory_label": {"maxLength": 200, "type": "string"},
+    "genesis": {"$ref": "identity_genesis.v1.schema.json"},
+    "identity_id": {"pattern": "^ueg:identity:sha256:[0-9a-f]{64}$", "type": "string"},
+    "protocol_version": {"const": "ueg-bplus/1", "type": "string"},
+    "schema": {"const": "ueg.identity-card.v1", "type": "string"}
+  },
+  "required": ["schema", "protocol_version", "identity_id", "advisory_label", "genesis"],
+  "title": "UEG B+ Public Identity Card v1",
+  "type": "object"
+}

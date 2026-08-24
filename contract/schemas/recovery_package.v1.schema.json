@@ -1,0 +1,44 @@
+{
+  "$id": "https://realitylayer.dev/schemas/recovery_package.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cipher": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {"const": "AES-256-GCM", "type": "string"},
+        "nonce_b64": {"pattern": "^[A-Za-z0-9+/]{16}$", "type": "string"}
+      },
+      "required": ["name", "nonce_b64"],
+      "type": "object"
+    },
+    "ciphertext_b64": {
+      "minLength": 24,
+      "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+      "type": "string"
+    },
+    "identity_id": {
+      "pattern": "^ueg:identity:sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "kdf": {
+      "additionalProperties": false,
+      "properties": {
+        "key_bytes": {"const": 32, "type": "integer"},
+        "memory_kib": {"const": 65536, "type": "integer"},
+        "name": {"const": "argon2id", "type": "string"},
+        "parallelism": {"maximum": 4, "minimum": 1, "type": "integer"},
+        "salt_b64": {"pattern": "^[A-Za-z0-9+/]{22}==$", "type": "string"},
+        "time": {"const": 3, "type": "integer"}
+      },
+      "required": ["name", "salt_b64", "time", "memory_kib", "parallelism", "key_bytes"],
+      "type": "object"
+    },
+    "protocol_version": {"const": "ueg-bplus/1", "type": "string"},
+    "recovery_root_key_id": {"pattern": "^ueg:sha256:[0-9a-f]{64}$", "type": "string"},
+    "schema": {"const": "ueg.recovery-package.v1", "type": "string"}
+  },
+  "required": ["schema", "protocol_version", "identity_id", "recovery_root_key_id", "kdf", "cipher", "ciphertext_b64"],
+  "title": "UEG B+ Encrypted Recovery Package v1",
+  "type": "object"
+}
